@@ -1,36 +1,39 @@
-## Задание 12
+## Задание 13
 
-### Файлы стенда
+### Репозиторий
 
-![image](image.png)
+https://github.com/ashermahonin/otus-linux-professional/tree/13-vagrant
 
-### Запуск стенда
+### Запуск
 
 ```bash
 vagrant up
 ```
 
+### Проверка дисков
+
+```bash
+vagrant ssh -c "df -h"
+```
+
+![image](image.png)
+
+### Проверка проброса порта
+
+Для Linux-хоста:
+
+```bash
+netstat -tulpn | grep 8080
+```
+
+На текущем хосте macOS:
+
+```bash
+netstat -anv -p tcp | grep 8080
+```
+
 ![image-1](image-1.png)
 
-### Проверка nginx на 8080
+### Что сделано
 
-```bash
-curl -sS -i http://127.0.0.1:8080
-```
-
-![image-2](image-2.png)
-
-### Проверка systemd и порта
-
-```bash
-vagrant ssh -c "systemctl is-enabled nginx"
-vagrant ssh -c "sudo ss -ltnp | grep ':8080'"
-```
-
-![image-3](image-3.png)
-
-### Условия Ansible
-
-Использованы `apt`, `template`, переменная `nginx_listen_port: 8080`, `notify`, `systemd enabled`.
-
-![image-4](image-4.png)
+В `Vagrantfile` создана ВМ с 1024 МБ памяти, добавлены два диска по 1 ГБ, настроен проброс `80 -> 8080`. Провижининг форматирует диски в `ext4`, создает `/mnt/disk1` и `/mnt/disk2`, монтирует их и добавляет записи в `/etc/fstab`.
