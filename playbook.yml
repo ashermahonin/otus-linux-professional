@@ -1,0 +1,39 @@
+---
+- name: Install nginx
+  hosts: all
+  become: true
+  vars:
+    nginx_listen_port: 8080
+
+  tasks:
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: true
+      notify: start nginx
+
+    - name: Configure nginx
+      ansible.builtin.template:
+        src: templates/default.conf.j2
+        dest: /etc/nginx/sites-available/default
+        owner: root
+        group: root
+        mode: "0644"
+      notify: restart nginx
+
+    - name: Enable nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+
+  handlers:
+    - name: start nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+
+    - name: restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
