@@ -1,119 +1,63 @@
-## Задание 16. PAM
+## Задание 17. Logging
 
 ### Репозиторий
 
-https://github.com/ashermahonin/otus-linux-professional/tree/16-pam
+https://github.com/ashermahonin/otus-linux-professional/tree/17-logging
 
 ### Задание
 
-Ограничить доступ к системе для всех пользователей, кроме группы администраторов, в субботу и воскресенье. Если выходной день попал в список праздничных дней, вход должен быть разрешен.
+Поднять две машины: `web` и `log`.
 
-### Файлы
+На `web` запустить `nginx`.
 
-`Vagrantfile` - создает виртуальную машину и настраивает PAM.
+На `log` настроить центральный лог-сервер.
 
-`README.md` - описание задания, команд и результата проверки.
+Настроить аудит изменений конфигурации `nginx`.
 
-### Запуск стенда
+Критичные логи с `web` должны писаться локально и уходить на `log`.
 
-```bash
-vagrant up
-```
+Логи `nginx` должны уходить на `log`. Локально остаются только критичные события.
 
-Вывод:
+Логи аудита тоже должны уходить на `log`.
 
-```text
-Bringing machine 'default' up with 'virtualbox' provider...
-==> default: Importing base box 'bento/ubuntu-22.04'...
-==> default: Setting the name of the VM: otus-16-pam
-==> default: Forwarding ports...
-    default: 22 (guest) => 2200 (host) (adapter 1)
-==> default: Machine booted and ready!
-==> default: Running provisioner: shell...
-    default: Running: inline script
-```
+### Что сделано
 
-### Проверка пользователей и группы admin
+На `web` запущены `nginx`, `rsyslog`, `auditd`.
 
-```bash
-vagrant ssh -c "getent group admin && id otus && id otusadm && id vagrant"
-```
+На `log` запущен `rsyslog`, прием логов открыт на порту `514`.
 
-Вывод:
+Для критичных сообщений на `web` настроена локальная запись в `/var/log/critical.log` и отправка на `log`.
+
+Для `nginx` настроена отправка access/error логов на `log`. Локальные файлы `/var/log/nginx/access.log` и `/var/log/nginx/error.log` после обычных запросов остаются пустыми.
+
+Для аудита включено правило:
 
 ```text
-admin:x:1001:otusadm,vagrant
-uid=1001(otus) gid=1002(otus) groups=1002(otus)
-uid=1002(otusadm) gid=1003(otusadm) groups=1003(otusadm),27(sudo),1001(admin)
-uid=1000(vagrant) gid=1000(vagrant) groups=1000(vagrant),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),110(lxd),1001(admin)
+-w /etc/nginx -p wa -k nginx_config
 ```
 
-### Проверка подключения PAM
+После изменения `/etc/nginx/nginx.conf` событие с ключом `nginx_config` появилось на удаленном сервере.
 
-```bash
-vagrant ssh -c "grep pam_weekend_check /etc/pam.d/sshd"
-```
+### Скриншот web
 
-Вывод:
+На скриншоте видно:
 
-```text
-account required pam_exec.so quiet /usr/local/bin/pam_weekend_check.sh
-```
+- сервисы `nginx`, `rsyslog`, `auditd` активны;
+- критичный лог есть локально;
+- локальные nginx access/error файлы пустые;
+- audit rule на `/etc/nginx` включен;
+- nginx пишет access/error в syslog на `log`.
 
-### Проверка списка праздничных дней
+![web local logs](screenshots/web-logs.png)
 
-```bash
-vagrant ssh -c "sudo cat /etc/security/pam_holidays"
-```
+### Скриншот log
 
-Вывод:
+На скриншоте видно:
 
-```text
-04-07-2026
-```
+- `rsyslog` слушает порт `514`;
+- на `log` есть удаленные файлы с `web`;
+- критичный лог пришел на `log`;
+- nginx access/error пришли на `log`;
+- audit-событие изменения `/etc/nginx/nginx.conf` пришло на `log`.
 
-### Проверка правил доступа
-
-`0` означает, что доступ разрешен. `1` означает, что доступ запрещен.
-
-```bash
-vagrant ssh -c 'check_access() { label="$1"; user="$2"; weekday="$3"; day="$4"; sudo env PAM_USER="$user" PAM_TEST_WEEKDAY="$weekday" PAM_TEST_DATE="$day" /usr/local/bin/pam_weekend_check.sh; rc=$?; echo "$label=$rc"; }; check_access otus_subbota otus 6 11-07-2026; check_access admin_subbota otusadm 6 11-07-2026; check_access otus_prazdnik otus 6 04-07-2026; check_access otus_budni otus 1 06-07-2026'
-```
-
-Вывод:
-
-```text
-otus_subbota=1
-admin_subbota=0
-otus_prazdnik=0
-otus_budni=0
-```
-
-Обычный пользователь `otus` не может войти в субботу `11-07-2026`. Пользователь `otusadm` входит в группу `admin`, поэтому ему вход разрешен даже в субботу. Дата `04-07-2026` есть в `/etc/security/pam_holidays`, поэтому в этот день обычный пользователь тоже может войти. В понедельник `06-07-2026` вход для `otus` разрешен.
-
-### Проверка реального SSH-входа
-
-Проверка выполнена `06-07-2026`, это понедельник.
-
-```bash
-sshpass -p otus ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2200 otus@127.0.0.1 'whoami && id -nG'
-```
-
-Вывод:
-
-```text
-otus
-otus
-```
-
-### Особенности реализации
-
-Проверка подключена к `sshd` в секции `account` через `pam_exec`.
-
-Скрипт `/usr/local/bin/pam_weekend_check.sh` берет имя пользователя из `PAM_USER`. Если пользователь состоит в группе `admin`, вход разрешается сразу. Для остальных пользователей проверяется дата: суббота и воскресенье запрещены, но даты из `/etc/security/pam_holidays` считаются исключением.
-
-Пользователь `vagrant` добавлен в `admin`, чтобы Vagrant мог подключаться к стенду в любой день.
-
-### Заметки
-
-Для проверки выходных и праздничных дней я использовал `PAM_TEST_WEEKDAY` и `PAM_TEST_DATE`. Так не нужно менять дату в виртуальной машине. При обычном входе по SSH эти переменные не задаются, скрипт берет текущую дату через `date`.
+![remote logs](screenshots/log-logs.png)
