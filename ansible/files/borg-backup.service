@@ -1,0 +1,6 @@
+[Unit]
+Description=Backup /etc with borg
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/borg-backup.sh

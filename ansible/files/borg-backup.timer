@@ -1,0 +1,11 @@
+[Unit]
+Description=Run borg backup every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnActiveSec=5min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
