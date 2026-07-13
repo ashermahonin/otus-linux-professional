@@ -1,189 +1,309 @@
 ---
-- name: Configure DHCP and PXE server
+- name: Install packages
   hosts: all
   become: true
-  vars:
-    pxe_address: 192.168.56.20
-    pxe_network: 192.168.56.0
-    pxe_netmask: 255.255.255.0
-    netboot_url: https://releases.ubuntu.com/24.04.4/ubuntu-24.04.4-netboot-amd64.tar.gz
-    installer_url: http://releases.ubuntu.com/24.04.4/ubuntu-24.04.4-live-server-amd64.iso
+  any_errors_fatal: true
   tasks:
-    - name: Install DHCP, TFTP and HTTP services
+    - name: Install iptables
       ansible.builtin.apt:
-        name:
-          - apache2
-          - iptables
-          - isc-dhcp-server
-          - tftpd-hpa
+        name: iptables
         state: present
-        update_cache: true
 
-    - name: Create TFTP directory
+- name: Prepare centralRouter
+  hosts: centralRouter
+  become: true
+  tasks:
+    - name: Install netcat
+      ansible.builtin.apt:
+        name: netcat-openbsd
+        state: present
+
+    - name: Create SSH directory
       ansible.builtin.file:
-        path: /srv/tftp
+        path: /home/vagrant/.ssh
         state: directory
-        owner: tftp
-        group: tftp
-        mode: "0755"
+        owner: vagrant
+        group: vagrant
+        mode: "0700"
 
-    - name: Download Ubuntu 24 netboot files
-      ansible.builtin.get_url:
-        url: "{{ netboot_url }}"
-        dest: /tmp/ubuntu-24.04.4-netboot-amd64.tar.gz
-        mode: "0644"
+    - name: Create SSH key
+      ansible.builtin.command:
+        cmd: ssh-keygen -q -t ed25519 -N '' -f /home/vagrant/.ssh/id_ed25519
+        creates: /home/vagrant/.ssh/id_ed25519
 
-    - name: Unpack Ubuntu 24 netboot files
-      ansible.builtin.unarchive:
-        src: /tmp/ubuntu-24.04.4-netboot-amd64.tar.gz
-        dest: /srv/tftp
-        remote_src: true
-        owner: tftp
-        group: tftp
-        creates: /srv/tftp/amd64/pxelinux.0
-
-    - name: Configure PXE boot menu
-      ansible.builtin.copy:
-        dest: /srv/tftp/amd64/pxelinux.cfg/default
-        owner: tftp
-        group: tftp
-        mode: "0644"
-        content: |
-          DEFAULT install
-          LABEL install
-            KERNEL linux
-            INITRD initrd
-            APPEND root=/dev/ram0 ramdisk_size=1500000 ip=dhcp iso-url={{ installer_url }} autoinstall ds=nocloud-net;s=http://{{ pxe_address }}/autoinstall/ ---
-
-    - name: Configure DHCP server interface
-      ansible.builtin.copy:
-        dest: /etc/default/isc-dhcp-server
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          INTERFACESv4="eth1"
-
-    - name: Configure DHCP for PXE client
-      ansible.builtin.copy:
-        dest: /etc/dhcp/dhcpd.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          default-lease-time 600;
-          max-lease-time 7200;
-          authoritative;
-
-          subnet {{ pxe_network }} netmask {{ pxe_netmask }} {
-            range 192.168.56.100 192.168.56.150;
-            option routers {{ pxe_address }};
-            option domain-name-servers 1.1.1.1;
-            next-server {{ pxe_address }};
-            filename "amd64/pxelinux.0";
-          }
-
-    - name: Configure TFTP server
-      ansible.builtin.copy:
-        dest: /etc/default/tftpd-hpa
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          TFTP_USERNAME="tftp"
-          TFTP_DIRECTORY="/srv/tftp"
-          TFTP_ADDRESS=":69"
-          TFTP_OPTIONS="--secure"
-
-    - name: Create directory for autoinstall files
+    - name: Set SSH key permissions
       ansible.builtin.file:
-        path: /var/www/html/autoinstall
-        state: directory
-        owner: root
-        group: root
+        path: /home/vagrant/.ssh/id_ed25519
+        owner: vagrant
+        group: vagrant
+        mode: "0600"
+
+    - name: Read SSH public key
+      ansible.builtin.slurp:
+        src: /home/vagrant/.ssh/id_ed25519.pub
+      register: central_router_public_key
+
+    - name: Create knock script
+      ansible.builtin.copy:
+        dest: /home/vagrant/knock.sh
+        owner: vagrant
+        group: vagrant
         mode: "0755"
-
-    - name: Publish user-data file
-      ansible.builtin.copy:
-        src: files/user-data
-        dest: /var/www/html/autoinstall/user-data
-        owner: root
-        group: root
-        mode: "0644"
-
-    - name: Publish meta-data file
-      ansible.builtin.copy:
-        dest: /var/www/html/autoinstall/meta-data
-        owner: root
-        group: root
-        mode: "0644"
         content: |
-          instance-id: pxe-client
-          local-hostname: pxe-client
+          #!/bin/bash
+          for port in 7000 8000 9000; do
+            nc -z -w 1 192.168.255.1 "$port" || true
+            sleep 1
+          done
+          exec ssh -i /home/vagrant/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null vagrant@192.168.255.1 "$@"
 
-    - name: Enable IPv4 forwarding
+- name: Install nginx
+  hosts: centralServer
+  become: true
+  tasks:
+    - name: Install nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Create nginx page
       ansible.builtin.copy:
-        dest: /etc/sysctl.d/60-pxe-forwarding.conf
+        dest: /var/www/html/index.nginx-debian.html
+        owner: root
+        group: root
+        mode: "0644"
+        content: "nginx on centralServer\n"
+
+    - name: Start nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+
+- name: Enable packet forwarding
+  hosts: routers
+  become: true
+  tasks:
+    - name: Save forwarding setting
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/60-otus-forwarding.conf
         owner: root
         group: root
         mode: "0644"
         content: "net.ipv4.ip_forward = 1\n"
       register: forwarding_config
 
-    - name: Apply IPv4 forwarding setting
+    - name: Apply forwarding setting
       ansible.builtin.command: sysctl --system
       when: forwarding_config.changed
       changed_when: false
 
-    - name: Save NAT rule for PXE network
+- name: Configure inetRouter
+  hosts: inetRouter
+  become: true
+  tasks:
+    - name: Add centralRouter key
+      ansible.builtin.lineinfile:
+        path: /home/vagrant/.ssh/authorized_keys
+        create: true
+        owner: vagrant
+        group: vagrant
+        mode: "0600"
+        line: "{{ hostvars['centralRouter']['central_router_public_key'].content | b64decode | trim }}"
+
+    - name: Save route to internal network
       ansible.builtin.copy:
-        dest: /etc/systemd/system/pxe-nat.service
+        dest: /etc/netplan/99-otus-route.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth1:
+                routes:
+                  - to: 192.168.100.0/24
+                    via: 192.168.255.2
+      register: route_config
+
+    - name: Apply route to internal network
+      ansible.builtin.command: netplan apply
+      when: route_config.changed
+      changed_when: false
+
+    - name: Create firewall directory
+      ansible.builtin.file:
+        path: /etc/iptables
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Save port knocking rules
+      ansible.builtin.copy:
+        dest: /etc/iptables/otus.rules
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          *filter
+          :INPUT ACCEPT [0:0]
+          :FORWARD ACCEPT [0:0]
+          :OUTPUT ACCEPT [0:0]
+          -A INPUT -i eth1 -p tcp --dport 7000 -m recent --name KNOCK1 --set -j DROP
+          -A INPUT -i eth1 -p tcp --dport 8000 -m recent --name KNOCK1 --rcheck --seconds 10 --reap -m recent --name KNOCK2 --set -j DROP
+          -A INPUT -i eth1 -p tcp --dport 9000 -m recent --name KNOCK2 --rcheck --seconds 10 --reap -m recent --name SSH_OPEN --set -j DROP
+          -A INPUT -i eth1 -p tcp --dport 22 -m recent --name SSH_OPEN --rcheck --seconds 30 --reap -j ACCEPT
+          -A INPUT -i eth1 -p tcp --dport 22 -j DROP
+          COMMIT
+          *nat
+          :PREROUTING ACCEPT [0:0]
+          :INPUT ACCEPT [0:0]
+          :OUTPUT ACCEPT [0:0]
+          :POSTROUTING ACCEPT [0:0]
+          -A POSTROUTING -s 192.168.255.0/30 -o eth0 -j MASQUERADE
+          -A POSTROUTING -s 192.168.100.0/24 -o eth0 -j MASQUERADE
+          COMMIT
+
+    - name: Save firewall service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/otus-iptables.service
         owner: root
         group: root
         mode: "0644"
         content: |
           [Unit]
-          Description=NAT for PXE network
+          Description=iptables rules for OTUS lab
           Wants=network-online.target
           After=network-online.target
 
           [Service]
           Type=oneshot
-          ExecStart=/bin/sh -c '/usr/sbin/iptables -t nat -C POSTROUTING -s {{ pxe_network }}/24 -o {{ ansible_facts.default_ipv4.interface }} -j MASQUERADE || /usr/sbin/iptables -t nat -A POSTROUTING -s {{ pxe_network }}/24 -o {{ ansible_facts.default_ipv4.interface }} -j MASQUERADE'
+          ExecStart=/usr/sbin/iptables-restore /etc/iptables/otus.rules
           RemainAfterExit=yes
 
           [Install]
           WantedBy=multi-user.target
 
-    - name: Enable NAT rule
+    - name: Enable port knocking firewall
       ansible.builtin.systemd:
-        name: pxe-nat.service
+        name: otus-iptables.service
         enabled: true
         state: restarted
         daemon_reload: true
 
-    - name: Start PXE services
+- name: Configure routes through inetRouter
+  hosts: internal_nodes
+  become: true
+  vars:
+    routes:
+      centralRouter:
+        interface: eth1
+        gateway: 192.168.255.1
+      centralServer:
+        interface: eth1
+        gateway: 192.168.100.1
+      inetRouter2:
+        interface: eth2
+        gateway: 192.168.100.1
+  tasks:
+    - name: Save default route
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-otus-route.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth0:
+                dhcp4: true
+                dhcp4-overrides:
+                  use-routes: false
+              {{ routes[inventory_hostname].interface }}:
+                routes:
+                  - to: default
+                    via: {{ routes[inventory_hostname].gateway }}
+      register: route_config
+
+    - name: Apply network configuration
+      ansible.builtin.command: netplan apply
+      when: route_config.changed
+      changed_when: false
+
+- name: Configure inetRouter2
+  hosts: inetRouter2
+  become: true
+  tasks:
+    - name: Create firewall directory
+      ansible.builtin.file:
+        path: /etc/iptables
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Save port forwarding rules
+      ansible.builtin.copy:
+        dest: /etc/iptables/otus.rules
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          *filter
+          :INPUT ACCEPT [0:0]
+          :FORWARD DROP [0:0]
+          :OUTPUT ACCEPT [0:0]
+          -A FORWARD -i eth1 -o eth2 -p tcp -d 192.168.100.2 --dport 80 -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+          -A FORWARD -i eth2 -o eth1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+          COMMIT
+          *nat
+          :PREROUTING ACCEPT [0:0]
+          :INPUT ACCEPT [0:0]
+          :OUTPUT ACCEPT [0:0]
+          :POSTROUTING ACCEPT [0:0]
+          -A PREROUTING -i eth1 -p tcp --dport 8080 -j DNAT --to-destination 192.168.100.2:80
+          -A POSTROUTING -o eth2 -p tcp -d 192.168.100.2 --dport 80 -j MASQUERADE
+          COMMIT
+
+    - name: Save firewall service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/otus-iptables.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=iptables rules for OTUS lab
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/sbin/iptables-restore /etc/iptables/otus.rules
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable port forwarding firewall
       ansible.builtin.systemd:
-        name: "{{ item }}"
+        name: otus-iptables.service
         enabled: true
         state: restarted
-      loop:
-        - apache2
-        - isc-dhcp-server
-        - tftpd-hpa
+        daemon_reload: true
 
-    - name: Check user-data availability
-      ansible.builtin.uri:
-        url: http://127.0.0.1/autoinstall/user-data
-        return_content: true
-      register: user_data
+- name: Check port knocking
+  hosts: centralRouter
+  become: true
+  tasks:
+    - name: Connect to inetRouter through knock script
+      ansible.builtin.command: sudo -u vagrant /home/vagrant/knock.sh hostname
+      register: knock_result
+      changed_when: false
 
-    - name: Check installation image availability
-      ansible.builtin.uri:
-        url: "{{ installer_url }}"
-        method: HEAD
-        status_code: 200
-
-    - name: Check autoinstall configuration
+    - name: Check knock result
       ansible.builtin.assert:
-        that: "'autoinstall:' in user_data.content"
+        that: knock_result.stdout == "inet-router"

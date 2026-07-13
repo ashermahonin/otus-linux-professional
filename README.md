@@ -1,38 +1,31 @@
-## Задание 20. DHCP и PXE
+## Задание 21. Iptables
 
 ### Файлы
 
-`Vagrantfile` создает PXE-сервер и клиент в сети `192.168.56.0/24`.
+`Vagrantfile` создает `inetRouter`, `centralRouter`, `centralServer` и `inetRouter2`.
 
-`ansible/playbook.yml` устанавливает и настраивает DHCP, TFTP, HTTP и NAT на PXE-сервере.
-
-`ansible/files/user-data` содержит параметры автоматической установки Ubuntu 24.
+`ansible/playbook.yml` настраивает маршруты, iptables, nginx и скрипт knocking.
 
 ### Запуск
 
-Сначала запускается сервер, затем клиент:
-
 ```bash
-vagrant up pxe_server
-VAGRANT_EXPERIMENTAL=none_communicator vagrant up pxe_client
+vagrant up
 ```
-
-### Работа стенда
-
-Клиент получает адрес от DHCP и загружает загрузчик, ядро и initrd через TFTP. Образ Ubuntu 24 берется из официального HTTP-репозитория. `user-data` и `meta-data` сервер отдает по HTTP из каталога `/autoinstall/`, поэтому установка проходит без вопросов в консоли.
-
-Для выхода клиента к репозиториям PXE-сервер передает трафик из внутренней сети через свой NAT-интерфейс.
 
 ### Проверка
 
-Проверка сервисов на PXE-сервере:
+Проверка SSH через knock script:
 
 ```bash
-vagrant ssh pxe_server -c "systemctl is-active isc-dhcp-server tftpd-hpa apache2"
+vagrant ssh centralRouter -c "sudo -u vagrant /home/vagrant/knock.sh hostname"
 ```
 
-Проверка выдачи адреса и загрузчика:
+В ответ будет `inet-router`.
+
+Проверка nginx через `inetRouter2` с хостовой машины:
 
 ```bash
-vagrant ssh pxe_server -c "journalctl -u isc-dhcp-server -n 20"
+curl http://192.168.56.21:8080
 ```
+
+В ответ будет `nginx on centralServer`.
