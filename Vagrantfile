@@ -1,50 +1,82 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
+MACHINES = {
+  "inetRouter" => {
+    networks: [
+      { ip: "192.168.255.1", netmask: "255.255.255.252", adapter: 2, virtualbox__intnet: "inet-net" }
+    ]
+  },
+  "centralRouter" => {
+    networks: [
+      { ip: "192.168.255.2", netmask: "255.255.255.252", adapter: 2, virtualbox__intnet: "inet-net" },
+      { ip: "192.168.0.17", netmask: "255.255.255.240", adapter: 3, virtualbox__intnet: "central-transit" },
+      { ip: "192.168.0.1", netmask: "255.255.255.240", adapter: 4, virtualbox__intnet: "central-directors" },
+      { ip: "192.168.0.33", netmask: "255.255.255.240", adapter: 5, virtualbox__intnet: "central-hardware" },
+      { ip: "192.168.0.65", netmask: "255.255.255.192", adapter: 6, virtualbox__intnet: "central-wifi" }
+    ]
+  },
+  "office1Router" => {
+    networks: [
+      { ip: "192.168.0.18", netmask: "255.255.255.240", adapter: 2, virtualbox__intnet: "central-transit" },
+      { ip: "192.168.2.1", netmask: "255.255.255.192", adapter: 3, virtualbox__intnet: "office1-dev" },
+      { ip: "192.168.2.65", netmask: "255.255.255.192", adapter: 4, virtualbox__intnet: "office1-test" },
+      { ip: "192.168.2.129", netmask: "255.255.255.192", adapter: 5, virtualbox__intnet: "office1-managers" },
+      { ip: "192.168.2.193", netmask: "255.255.255.192", adapter: 6, virtualbox__intnet: "office1-hardware" }
+    ]
+  },
+  "office2Router" => {
+    networks: [
+      { ip: "192.168.0.19", netmask: "255.255.255.240", adapter: 2, virtualbox__intnet: "central-transit" },
+      { ip: "192.168.1.1", netmask: "255.255.255.128", adapter: 3, virtualbox__intnet: "office2-dev" },
+      { ip: "192.168.1.129", netmask: "255.255.255.192", adapter: 4, virtualbox__intnet: "office2-test" },
+      { ip: "192.168.1.193", netmask: "255.255.255.192", adapter: 5, virtualbox__intnet: "office2-hardware" }
+    ]
+  },
+  "centralServer" => {
+    networks: [
+      { ip: "192.168.0.2", netmask: "255.255.255.240", adapter: 2, virtualbox__intnet: "central-directors" }
+    ]
+  },
+  "office1Server" => {
+    networks: [
+      { ip: "192.168.2.2", netmask: "255.255.255.192", adapter: 2, virtualbox__intnet: "office1-dev" }
+    ]
+  },
+  "office2Server" => {
+    networks: [
+      { ip: "192.168.1.2", netmask: "255.255.255.128", adapter: 2, virtualbox__intnet: "office2-dev" }
+    ]
+  }
+}.freeze
+
 Vagrant.configure("2") do |config|
   config.vm.box = "bento/ubuntu-22.04"
 
-  config.vm.define "backup_server" do |backup|
-    backup.vm.hostname = "backup-server"
-    backup.vm.network "private_network", ip: "192.168.56.18"
+  MACHINES.each do |name, machine|
+    config.vm.define name do |node|
+      node.vm.hostname = name
 
-    backup.vm.provider "virtualbox" do |v|
-      v.name = "otus-18-backup-server"
-      v.memory = 1024
-      v.cpus = 1
-
-      disk_path = File.join(__dir__, "backup.vdi")
-
-      unless File.exist?(disk_path)
-        v.customize ["createmedium", "disk", "--filename", disk_path, "--size", 2048, "--format", "VDI"]
+      machine[:networks].each do |network|
+        node.vm.network "private_network", **network
       end
 
-      v.customize ["storageattach", :id, "--storagectl", "VirtIO Controller", "--port", 1, "--device", 0, "--type", "hdd", "--medium", disk_path]
-    end
-  end
+      node.vm.provider "virtualbox" do |virtualbox|
+        virtualbox.name = "otus-19-#{name}"
+        virtualbox.memory = 1024
+        virtualbox.cpus = 1
+      end
 
-  config.vm.define "client" do |client|
-    client.vm.hostname = "client"
-    client.vm.network "private_network", ip: "192.168.56.19"
+      next unless name == "office2Server"
 
-    client.vm.provider "virtualbox" do |v|
-      v.name = "otus-18-client"
-      v.memory = 1024
-      v.cpus = 1
-    end
-
-    client.vm.provision "ansible" do |ansible|
-      ansible.playbook = "ansible/playbook.yml"
-      ansible.limit = "all"
-      ansible.groups = {
-        "backup_servers" => ["backup_server"],
-        "clients" => ["client"]
-      }
-      ansible.extra_vars = {
-        backup_server_ip: "192.168.56.18",
-        borg_repo: "borg@192.168.56.18:/var/backup/etc.borg",
-        borg_passphrase: "otus-borg-passphrase"
-      }
+      node.vm.provision "ansible" do |ansible|
+        ansible.playbook = "ansible/playbook.yml"
+        ansible.limit = "all"
+        ansible.groups = {
+          "routers" => ["inetRouter", "centralRouter", "office1Router", "office2Router"],
+          "network_nodes" => ["centralRouter", "office1Router", "office2Router", "centralServer", "office1Server", "office2Server"]
+        }
+      end
     end
   end
 end
