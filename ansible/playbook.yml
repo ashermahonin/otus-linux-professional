@@ -1,192 +1,155 @@
 ---
-- name: Install tools for network checks
+- name: Configure DHCP and PXE server
   hosts: all
   become: true
-  tasks:
-    - name: Install ping
-      ansible.builtin.apt:
-        name: iputils-ping
-        state: present
-
-- name: Configure routes without Vagrant NAT
-  hosts: network_nodes
-  become: true
   vars:
-    default_gateways:
-      centralRouter: 192.168.255.1
-      office1Router: 192.168.0.17
-      office2Router: 192.168.0.17
-      centralServer: 192.168.0.1
-      office1Server: 192.168.2.1
-      office2Server: 192.168.1.1
-    static_routes:
-      centralRouter:
-        - network: 192.168.1.0/24
-          gateway: 192.168.0.19
-        - network: 192.168.2.0/24
-          gateway: 192.168.0.18
+    pxe_address: 192.168.56.20
+    pxe_network: 192.168.56.0
+    pxe_netmask: 255.255.255.0
+    netboot_url: https://releases.ubuntu.com/24.04.4/ubuntu-24.04.4-netboot-amd64.tar.gz
+    installer_url: http://releases.ubuntu.com/24.04.4/ubuntu-24.04.4-live-server-amd64.iso
   tasks:
-    - name: Ignore NAT route from Vagrant interface
+    - name: Install DHCP, TFTP and HTTP services
+      ansible.builtin.apt:
+        name:
+          - apache2
+          - iptables
+          - isc-dhcp-server
+          - tftpd-hpa
+        state: present
+        update_cache: true
+
+    - name: Create TFTP directory
+      ansible.builtin.file:
+        path: /srv/tftp
+        state: directory
+        owner: tftp
+        group: tftp
+        mode: "0755"
+
+    - name: Download Ubuntu 24 netboot files
+      ansible.builtin.get_url:
+        url: "{{ netboot_url }}"
+        dest: /tmp/ubuntu-24.04.4-netboot-amd64.tar.gz
+        mode: "0644"
+
+    - name: Unpack Ubuntu 24 netboot files
+      ansible.builtin.unarchive:
+        src: /tmp/ubuntu-24.04.4-netboot-amd64.tar.gz
+        dest: /srv/tftp
+        remote_src: true
+        owner: tftp
+        group: tftp
+        creates: /srv/tftp/amd64/pxelinux.0
+
+    - name: Configure PXE boot menu
       ansible.builtin.copy:
-        dest: /etc/netplan/99-otus-no-nat-route.yaml
-        owner: root
-        group: root
-        mode: "0600"
+        dest: /srv/tftp/amd64/pxelinux.cfg/default
+        owner: tftp
+        group: tftp
+        mode: "0644"
         content: |
-          network:
-            version: 2
-            ethernets:
-              enp0s8:
-                dhcp4: true
-                dhcp4-overrides:
-                  use-routes: false
-                  use-dns: false
-      register: netplan_config
+          DEFAULT install
+          LABEL install
+            KERNEL linux
+            INITRD initrd
+            APPEND root=/dev/ram0 ramdisk_size=1500000 ip=dhcp iso-url={{ installer_url }} autoinstall ds=nocloud-net;s=http://{{ pxe_address }}/autoinstall/ ---
 
-    - name: Apply Netplan configuration
-      ansible.builtin.command: netplan apply
-      when: netplan_config.changed
-      changed_when: false
-
-    - name: Save default route and static routes
+    - name: Configure DHCP server interface
       ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-network-routes.service
+        dest: /etc/default/isc-dhcp-server
         owner: root
         group: root
         mode: "0644"
         content: |
-          [Unit]
-          Description=Routes for OTUS network lab
-          Wants=network-online.target
-          After=network-online.target
+          INTERFACESv4="eth1"
 
-          [Service]
-          Type=oneshot
-          ExecStartPre=/bin/sleep 5
-          ExecStart=/bin/sh -c '/usr/sbin/ip route flush dev eth0 proto dhcp || true'
-          ExecStart=/usr/sbin/ip route replace default via {{ default_gateways[inventory_hostname] }}
-          {% for route in static_routes.get(inventory_hostname, []) %}
-          ExecStart=/usr/sbin/ip route replace {{ route.network }} via {{ route.gateway }}
-          {% endfor %}
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Watch Vagrant network configuration
+    - name: Configure DHCP for PXE client
       ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-network-routes.path
+        dest: /etc/dhcp/dhcpd.conf
         owner: root
         group: root
         mode: "0644"
         content: |
-          [Unit]
-          Description=Reapply routes after Vagrant network setup
+          default-lease-time 600;
+          max-lease-time 7200;
+          authoritative;
 
-          [Path]
-          PathChanged=/etc/netplan/50-vagrant.yaml
-          Unit=otus-network-routes.service
+          subnet {{ pxe_network }} netmask {{ pxe_netmask }} {
+            range 192.168.56.100 192.168.56.150;
+            option routers {{ pxe_address }};
+            option domain-name-servers 1.1.1.1;
+            next-server {{ pxe_address }};
+            filename "amd64/pxelinux.0";
+          }
 
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Enable routes
-      ansible.builtin.systemd:
-        name: otus-network-routes.service
-        enabled: true
-        state: restarted
-        daemon_reload: true
-
-    - name: Enable route watcher
-      ansible.builtin.systemd:
-        name: otus-network-routes.path
-        enabled: true
-        state: started
-        daemon_reload: true
-
-    - name: Read default route
-      ansible.builtin.command: ip route show default
-      register: default_route
-      changed_when: false
-
-    - name: Check default route
-      ansible.builtin.assert:
-        that:
-          - default_gateways[inventory_hostname] in default_route.stdout
-          - "'10.0.2.2' not in default_route.stdout"
-
-- name: Configure route on internet gateway
-  hosts: inetRouter
-  become: true
-  tasks:
-    - name: Save route to office networks
+    - name: Configure TFTP server
       ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-inet-route.service
+        dest: /etc/default/tftpd-hpa
         owner: root
         group: root
         mode: "0644"
         content: |
-          [Unit]
-          Description=Route to OTUS office networks
-          Wants=network-online.target
-          After=network-online.target
+          TFTP_USERNAME="tftp"
+          TFTP_DIRECTORY="/srv/tftp"
+          TFTP_ADDRESS=":69"
+          TFTP_OPTIONS="--secure"
 
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/sbin/ip route replace 192.168.0.0/16 via 192.168.255.2
-          RemainAfterExit=yes
+    - name: Create directory for autoinstall files
+      ansible.builtin.file:
+        path: /var/www/html/autoinstall
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
 
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Enable route to office networks
-      ansible.builtin.systemd:
-        name: otus-inet-route.service
-        enabled: true
-        state: restarted
-        daemon_reload: true
-
-- name: Enable packet forwarding
-  hosts: routers
-  become: true
-  tasks:
-    - name: Save forwarding setting
+    - name: Publish user-data file
       ansible.builtin.copy:
-        dest: /etc/sysctl.d/60-otus-network.conf
+        src: files/user-data
+        dest: /var/www/html/autoinstall/user-data
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Publish meta-data file
+      ansible.builtin.copy:
+        dest: /var/www/html/autoinstall/meta-data
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          instance-id: pxe-client
+          local-hostname: pxe-client
+
+    - name: Enable IPv4 forwarding
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/60-pxe-forwarding.conf
         owner: root
         group: root
         mode: "0644"
         content: "net.ipv4.ip_forward = 1\n"
       register: forwarding_config
 
-    - name: Apply forwarding setting
+    - name: Apply IPv4 forwarding setting
       ansible.builtin.command: sysctl --system
       when: forwarding_config.changed
       changed_when: false
 
-- name: Configure internet gateway
-  hosts: inetRouter
-  become: true
-  tasks:
-    - name: Install iptables
-      ansible.builtin.apt:
-        name: iptables
-        state: present
-
-    - name: Save NAT rule
+    - name: Save NAT rule for PXE network
       ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-network-nat.service
+        dest: /etc/systemd/system/pxe-nat.service
         owner: root
         group: root
         mode: "0644"
         content: |
           [Unit]
-          Description=NAT for OTUS network lab
+          Description=NAT for PXE network
           Wants=network-online.target
           After=network-online.target
 
           [Service]
           Type=oneshot
-          ExecStart=/bin/sh -c '/usr/sbin/iptables -t nat -C POSTROUTING -s 192.168.0.0/16 -o {{ ansible_facts["default_ipv4"]["interface"] }} -j MASQUERADE || /usr/sbin/iptables -t nat -A POSTROUTING -s 192.168.0.0/16 -o {{ ansible_facts["default_ipv4"]["interface"] }} -j MASQUERADE'
+          ExecStart=/bin/sh -c '/usr/sbin/iptables -t nat -C POSTROUTING -s {{ pxe_network }}/24 -o {{ ansible_facts.default_ipv4.interface }} -j MASQUERADE || /usr/sbin/iptables -t nat -A POSTROUTING -s {{ pxe_network }}/24 -o {{ ansible_facts.default_ipv4.interface }} -j MASQUERADE'
           RemainAfterExit=yes
 
           [Install]
@@ -194,40 +157,33 @@
 
     - name: Enable NAT rule
       ansible.builtin.systemd:
-        name: otus-network-nat.service
+        name: pxe-nat.service
         enabled: true
         state: restarted
         daemon_reload: true
 
-- name: Check communication between servers
-  hosts: centralServer
-  become: true
-  tasks:
-    - name: Ping office servers from central server
-      ansible.builtin.command: ping -c 2 -W 2 {{ item }}
+    - name: Start PXE services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: restarted
       loop:
-        - 192.168.2.2
-        - 192.168.1.2
-      changed_when: false
+        - apache2
+        - isc-dhcp-server
+        - tftpd-hpa
 
-- name: Check communication from office servers
-  hosts: office1Server
-  become: true
-  tasks:
-    - name: Ping central and second office server
-      ansible.builtin.command: ping -c 2 -W 2 {{ item }}
-      loop:
-        - 192.168.0.2
-        - 192.168.1.2
-      changed_when: false
+    - name: Check user-data availability
+      ansible.builtin.uri:
+        url: http://127.0.0.1/autoinstall/user-data
+        return_content: true
+      register: user_data
 
-- name: Check communication from second office
-  hosts: office2Server
-  become: true
-  tasks:
-    - name: Ping central and first office server
-      ansible.builtin.command: ping -c 2 -W 2 {{ item }}
-      loop:
-        - 192.168.0.2
-        - 192.168.2.2
-      changed_when: false
+    - name: Check installation image availability
+      ansible.builtin.uri:
+        url: "{{ installer_url }}"
+        method: HEAD
+        status_code: 200
+
+    - name: Check autoinstall configuration
+      ansible.builtin.assert:
+        that: "'autoinstall:' in user_data.content"

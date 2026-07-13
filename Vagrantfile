@@ -1,82 +1,42 @@
 # -*- mode: ruby -*-
-# vi: set ft=ruby :
-
-MACHINES = {
-  "inetRouter" => {
-    networks: [
-      { ip: "192.168.255.1", netmask: "255.255.255.252", adapter: 2, virtualbox__intnet: "inet-net" }
-    ]
-  },
-  "centralRouter" => {
-    networks: [
-      { ip: "192.168.255.2", netmask: "255.255.255.252", adapter: 2, virtualbox__intnet: "inet-net" },
-      { ip: "192.168.0.17", netmask: "255.255.255.240", adapter: 3, virtualbox__intnet: "central-transit" },
-      { ip: "192.168.0.1", netmask: "255.255.255.240", adapter: 4, virtualbox__intnet: "central-directors" },
-      { ip: "192.168.0.33", netmask: "255.255.255.240", adapter: 5, virtualbox__intnet: "central-hardware" },
-      { ip: "192.168.0.65", netmask: "255.255.255.192", adapter: 6, virtualbox__intnet: "central-wifi" }
-    ]
-  },
-  "office1Router" => {
-    networks: [
-      { ip: "192.168.0.18", netmask: "255.255.255.240", adapter: 2, virtualbox__intnet: "central-transit" },
-      { ip: "192.168.2.1", netmask: "255.255.255.192", adapter: 3, virtualbox__intnet: "office1-dev" },
-      { ip: "192.168.2.65", netmask: "255.255.255.192", adapter: 4, virtualbox__intnet: "office1-test" },
-      { ip: "192.168.2.129", netmask: "255.255.255.192", adapter: 5, virtualbox__intnet: "office1-managers" },
-      { ip: "192.168.2.193", netmask: "255.255.255.192", adapter: 6, virtualbox__intnet: "office1-hardware" }
-    ]
-  },
-  "office2Router" => {
-    networks: [
-      { ip: "192.168.0.19", netmask: "255.255.255.240", adapter: 2, virtualbox__intnet: "central-transit" },
-      { ip: "192.168.1.1", netmask: "255.255.255.128", adapter: 3, virtualbox__intnet: "office2-dev" },
-      { ip: "192.168.1.129", netmask: "255.255.255.192", adapter: 4, virtualbox__intnet: "office2-test" },
-      { ip: "192.168.1.193", netmask: "255.255.255.192", adapter: 5, virtualbox__intnet: "office2-hardware" }
-    ]
-  },
-  "centralServer" => {
-    networks: [
-      { ip: "192.168.0.2", netmask: "255.255.255.240", adapter: 2, virtualbox__intnet: "central-directors" }
-    ]
-  },
-  "office1Server" => {
-    networks: [
-      { ip: "192.168.2.2", netmask: "255.255.255.192", adapter: 2, virtualbox__intnet: "office1-dev" }
-    ]
-  },
-  "office2Server" => {
-    networks: [
-      { ip: "192.168.1.2", netmask: "255.255.255.128", adapter: 2, virtualbox__intnet: "office2-dev" }
-    ]
-  }
-}.freeze
 
 Vagrant.configure("2") do |config|
   config.vm.box = "bento/ubuntu-22.04"
 
-  MACHINES.each do |name, machine|
-    config.vm.define name do |node|
-      node.vm.hostname = name
+  config.vm.define "pxe_server" do |server|
+    server.vm.hostname = "pxe-server"
+    server.vm.network "private_network",
+                      ip: "192.168.56.20",
+                      virtualbox__intnet: "pxe-net"
 
-      machine[:networks].each do |network|
-        node.vm.network "private_network", **network
-      end
+    server.vm.provider "virtualbox" do |virtualbox|
+      virtualbox.name = "otus-20-pxe-server"
+      virtualbox.memory = 1024
+      virtualbox.cpus = 1
+    end
 
-      node.vm.provider "virtualbox" do |virtualbox|
-        virtualbox.name = "otus-19-#{name}"
-        virtualbox.memory = 1024
-        virtualbox.cpus = 1
-      end
+    server.vm.provision "ansible" do |ansible|
+      ansible.playbook = "ansible/playbook.yml"
+    end
+  end
 
-      next unless name == "office2Server"
+  config.vm.define "pxe_client" do |client|
+    client.vm.hostname = "pxe-client"
+    client.vm.communicator = "none"
+    client.vm.network "private_network",
+                      type: "dhcp",
+                      auto_config: false,
+                      virtualbox__intnet: "pxe-net"
 
-      node.vm.provision "ansible" do |ansible|
-        ansible.playbook = "ansible/playbook.yml"
-        ansible.limit = "all"
-        ansible.groups = {
-          "routers" => ["inetRouter", "centralRouter", "office1Router", "office2Router"],
-          "network_nodes" => ["centralRouter", "office1Router", "office2Router", "centralServer", "office1Server", "office2Server"]
-        }
-      end
+    client.vm.provider "virtualbox" do |virtualbox|
+      virtualbox.name = "otus-20-pxe-client"
+      virtualbox.memory = 2048
+      virtualbox.cpus = 1
+      virtualbox.customize ["modifyvm", :id, "--boot1", "net"]
+      virtualbox.customize ["modifyvm", :id, "--boot2", "disk"]
+      virtualbox.customize ["modifyvm", :id, "--nic1", "none"]
+      virtualbox.customize ["modifyvm", :id, "--nic-boot-prio1", "0"]
+      virtualbox.customize ["modifyvm", :id, "--nic-boot-prio2", "1"]
     end
   end
 end
