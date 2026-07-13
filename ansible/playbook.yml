@@ -1,309 +1,389 @@
 ---
-- name: Install packages
-  hosts: all
-  become: true
-  any_errors_fatal: true
-  tasks:
-    - name: Install iptables
-      ansible.builtin.apt:
-        name: iptables
-        state: present
-
-- name: Prepare centralRouter
-  hosts: centralRouter
-  become: true
-  tasks:
-    - name: Install netcat
-      ansible.builtin.apt:
-        name: netcat-openbsd
-        state: present
-
-    - name: Create SSH directory
-      ansible.builtin.file:
-        path: /home/vagrant/.ssh
-        state: directory
-        owner: vagrant
-        group: vagrant
-        mode: "0700"
-
-    - name: Create SSH key
-      ansible.builtin.command:
-        cmd: ssh-keygen -q -t ed25519 -N '' -f /home/vagrant/.ssh/id_ed25519
-        creates: /home/vagrant/.ssh/id_ed25519
-
-    - name: Set SSH key permissions
-      ansible.builtin.file:
-        path: /home/vagrant/.ssh/id_ed25519
-        owner: vagrant
-        group: vagrant
-        mode: "0600"
-
-    - name: Read SSH public key
-      ansible.builtin.slurp:
-        src: /home/vagrant/.ssh/id_ed25519.pub
-      register: central_router_public_key
-
-    - name: Create knock script
-      ansible.builtin.copy:
-        dest: /home/vagrant/knock.sh
-        owner: vagrant
-        group: vagrant
-        mode: "0755"
-        content: |
-          #!/bin/bash
-          for port in 7000 8000 9000; do
-            nc -z -w 1 192.168.255.1 "$port" || true
-            sleep 1
-          done
-          exec ssh -i /home/vagrant/.ssh/id_ed25519 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null vagrant@192.168.255.1 "$@"
-
-- name: Install nginx
-  hosts: centralServer
-  become: true
-  tasks:
-    - name: Install nginx
-      ansible.builtin.apt:
-        name: nginx
-        state: present
-
-    - name: Create nginx page
-      ansible.builtin.copy:
-        dest: /var/www/html/index.nginx-debian.html
-        owner: root
-        group: root
-        mode: "0644"
-        content: "nginx on centralServer\n"
-
-    - name: Start nginx
-      ansible.builtin.systemd:
-        name: nginx
-        enabled: true
-        state: started
-
-- name: Enable packet forwarding
+- name: Configure OSPF routers
   hosts: routers
   become: true
+  any_errors_fatal: true
+  vars:
+    quagga_version: 1.2.4
+    quagga_source: /usr/local/src/quagga-1.2.4
+    routers:
+      router1:
+        router_id: 1.1.1.1
+        loopback: 172.16.1.1/32
+        vlans:
+          - parent: eth1
+            name: eth1.10
+            id: 10
+            address: 10.10.10.1/24
+          - parent: eth2
+            name: eth2.20
+            id: 20
+            address: 10.10.20.1/24
+        networks:
+          - 10.10.10.0/24
+          - 10.10.20.0/24
+        interfaces:
+          - name: eth1.10
+            cost: 10
+          - name: eth2.20
+            cost: 100
+      router2:
+        router_id: 2.2.2.2
+        loopback: 172.16.2.2/32
+        vlans:
+          - parent: eth1
+            name: eth1.10
+            id: 10
+            address: 10.10.10.2/24
+          - parent: eth2
+            name: eth2.30
+            id: 30
+            address: 10.10.30.2/24
+        networks:
+          - 10.10.10.0/24
+          - 10.10.30.0/24
+        interfaces:
+          - name: eth1.10
+            cost: 10
+          - name: eth2.30
+            cost: 10
+      router3:
+        router_id: 3.3.3.3
+        loopback: 172.16.3.3/32
+        vlans:
+          - parent: eth1
+            name: eth1.20
+            id: 20
+            address: 10.10.20.2/24
+          - parent: eth2
+            name: eth2.30
+            id: 30
+            address: 10.10.30.3/24
+        networks:
+          - 10.10.20.0/24
+          - 10.10.30.0/24
+        interfaces:
+          - name: eth1.20
+            cost: 100
+          - name: eth2.30
+            cost: 10
+
   tasks:
-    - name: Save forwarding setting
+    - name: Install Quagga build dependencies
+      ansible.builtin.apt:
+        name:
+          - bison
+          - build-essential
+          - flex
+          - libc-ares-dev
+          - libcap-dev
+          - libreadline-dev
+          - pkg-config
+          - texinfo
+        state: present
+        update_cache: true
+
+    - name: Create Quagga user
+      ansible.builtin.user:
+        name: quagga
+        system: true
+        shell: /usr/sbin/nologin
+
+    - name: Download Quagga
+      ansible.builtin.get_url:
+        url: "https://github.com/Quagga/quagga/releases/download/quagga-{{ quagga_version }}/quagga-{{ quagga_version }}.tar.gz"
+        dest: "/usr/local/src/quagga-{{ quagga_version }}.tar.gz"
+        mode: "0644"
+
+    - name: Unpack Quagga
+      ansible.builtin.unarchive:
+        src: "/usr/local/src/quagga-{{ quagga_version }}.tar.gz"
+        dest: /usr/local/src
+        remote_src: true
+        creates: "{{ quagga_source }}/configure"
+
+    - name: Configure Quagga build
+      ansible.builtin.command:
+        cmd: ./configure --prefix=/usr --sysconfdir=/etc/quagga --localstatedir=/var/run/quagga --enable-vtysh --enable-user=quagga --enable-group=quagga
+        chdir: "{{ quagga_source }}"
+        creates: "{{ quagga_source }}/config.status"
+      environment:
+        CFLAGS: -fcommon
+
+    - name: Build Quagga
+      ansible.builtin.command:
+        cmd: make -j2
+        chdir: "{{ quagga_source }}"
+        creates: "{{ quagga_source }}/zebra/.libs/zebra"
+
+    - name: Install Quagga
+      ansible.builtin.command:
+        cmd: make install
+        chdir: "{{ quagga_source }}"
+        creates: /usr/sbin/zebra
+
+    - name: Create Quagga configuration directory
+      ansible.builtin.file:
+        path: /etc/quagga
+        state: directory
+        owner: root
+        group: quagga
+        mode: "0755"
+
+    - name: Create Quagga log directory
+      ansible.builtin.file:
+        path: /var/log/quagga
+        state: directory
+        owner: quagga
+        group: quagga
+        mode: "0755"
+
+    - name: Enable IPv4 forwarding
       ansible.builtin.copy:
-        dest: /etc/sysctl.d/60-otus-forwarding.conf
+        dest: /etc/sysctl.d/60-otus-routing.conf
         owner: root
         group: root
         mode: "0644"
         content: "net.ipv4.ip_forward = 1\n"
       register: forwarding_config
 
-    - name: Apply forwarding setting
+    - name: Apply IPv4 forwarding setting
       ansible.builtin.command: sysctl --system
       when: forwarding_config.changed
       changed_when: false
 
-- name: Configure inetRouter
-  hosts: inetRouter
-  become: true
-  tasks:
-    - name: Add centralRouter key
-      ansible.builtin.lineinfile:
-        path: /home/vagrant/.ssh/authorized_keys
-        create: true
-        owner: vagrant
-        group: vagrant
-        mode: "0600"
-        line: "{{ hostvars['centralRouter']['central_router_public_key'].content | b64decode | trim }}"
-
-    - name: Save route to internal network
+    - name: Create VLAN interface service
       ansible.builtin.copy:
-        dest: /etc/netplan/99-otus-route.yaml
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          network:
-            version: 2
-            ethernets:
-              eth1:
-                routes:
-                  - to: 192.168.100.0/24
-                    via: 192.168.255.2
-      register: route_config
-
-    - name: Apply route to internal network
-      ansible.builtin.command: netplan apply
-      when: route_config.changed
-      changed_when: false
-
-    - name: Create firewall directory
-      ansible.builtin.file:
-        path: /etc/iptables
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Save port knocking rules
-      ansible.builtin.copy:
-        dest: /etc/iptables/otus.rules
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          *filter
-          :INPUT ACCEPT [0:0]
-          :FORWARD ACCEPT [0:0]
-          :OUTPUT ACCEPT [0:0]
-          -A INPUT -i eth1 -p tcp --dport 7000 -m recent --name KNOCK1 --set -j DROP
-          -A INPUT -i eth1 -p tcp --dport 8000 -m recent --name KNOCK1 --rcheck --seconds 10 --reap -m recent --name KNOCK2 --set -j DROP
-          -A INPUT -i eth1 -p tcp --dport 9000 -m recent --name KNOCK2 --rcheck --seconds 10 --reap -m recent --name SSH_OPEN --set -j DROP
-          -A INPUT -i eth1 -p tcp --dport 22 -m recent --name SSH_OPEN --rcheck --seconds 30 --reap -j ACCEPT
-          -A INPUT -i eth1 -p tcp --dport 22 -j DROP
-          COMMIT
-          *nat
-          :PREROUTING ACCEPT [0:0]
-          :INPUT ACCEPT [0:0]
-          :OUTPUT ACCEPT [0:0]
-          :POSTROUTING ACCEPT [0:0]
-          -A POSTROUTING -s 192.168.255.0/30 -o eth0 -j MASQUERADE
-          -A POSTROUTING -s 192.168.100.0/24 -o eth0 -j MASQUERADE
-          COMMIT
-
-    - name: Save firewall service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-iptables.service
+        dest: /etc/systemd/system/otus-vlans.service
         owner: root
         group: root
         mode: "0644"
         content: |
           [Unit]
-          Description=iptables rules for OTUS lab
-          Wants=network-online.target
+          Description=VLAN interfaces for OSPF
           After=network-online.target
+          Wants=network-online.target
+          Before=otus-loopback.service quagga-zebra.service
 
           [Service]
           Type=oneshot
-          ExecStart=/usr/sbin/iptables-restore /etc/iptables/otus.rules
+          {% for vlan in routers[inventory_hostname].vlans %}
+          ExecStart=/usr/sbin/ip address flush dev {{ vlan.parent }}
+          ExecStart=/usr/sbin/ip link set {{ vlan.parent }} up
+          ExecStart=/usr/sbin/ip link add link {{ vlan.parent }} name {{ vlan.name }} type vlan id {{ vlan.id }}
+          ExecStart=/usr/sbin/ip address add {{ vlan.address }} dev {{ vlan.name }}
+          ExecStart=/usr/sbin/ip link set {{ vlan.name }} up
+          {% endfor %}
           RemainAfterExit=yes
 
           [Install]
           WantedBy=multi-user.target
 
-    - name: Enable port knocking firewall
+    - name: Enable VLAN interface service
       ansible.builtin.systemd:
-        name: otus-iptables.service
+        name: otus-vlans.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Create loopback address service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/otus-loopback.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Loopback address for OSPF
+          After=otus-vlans.service
+          Before=quagga-zebra.service
+          Requires=otus-vlans.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/sbin/ip address replace {{ routers[inventory_hostname].loopback }} dev lo
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable loopback address service
+      ansible.builtin.systemd:
+        name: otus-loopback.service
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Configure Zebra
+      ansible.builtin.copy:
+        dest: /etc/quagga/zebra.conf
+        owner: quagga
+        group: quagga
+        mode: "0640"
+        content: |
+          hostname {{ inventory_hostname }}
+          password zebra
+          enable password zebra
+          log file /var/log/quagga/zebra.log
+
+    - name: Configure OSPF
+      ansible.builtin.copy:
+        dest: /etc/quagga/ospfd.conf
+        owner: quagga
+        group: quagga
+        mode: "0640"
+        content: |
+          hostname {{ inventory_hostname }}
+          password zebra
+          enable password zebra
+          log file /var/log/quagga/ospfd.log
+          {% for interface in routers[inventory_hostname].interfaces %}
+          interface {{ interface.name }}
+           ip ospf cost {{ interface.cost }}
+          !
+          {% endfor %}
+          router ospf
+           ospf router-id {{ routers[inventory_hostname].router_id }}
+           passive-interface eth0
+           network {{ routers[inventory_hostname].loopback }} area 0
+          {% for network in routers[inventory_hostname].networks %}
+           network {{ network }} area 0
+          {% endfor %}
+
+    - name: Create Zebra service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/quagga-zebra.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Quagga Zebra
+          After=network-online.target otus-loopback.service
+          Wants=network-online.target
+          Requires=otus-loopback.service
+
+          [Service]
+          Type=simple
+          ExecStartPre=/usr/bin/install -d -o quagga -g quagga -m 0755 /run/quagga
+          ExecStart=/usr/sbin/zebra -f /etc/quagga/zebra.conf -A 127.0.0.1
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Create OSPF service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/quagga-ospfd.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Quagga OSPF
+          After=quagga-zebra.service
+          Requires=quagga-zebra.service
+
+          [Service]
+          Type=simple
+          ExecStartPre=/usr/bin/install -d -o quagga -g quagga -m 0755 /run/quagga
+          ExecStart=/usr/sbin/ospfd -f /etc/quagga/ospfd.conf -A 127.0.0.1
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Start Zebra
+      ansible.builtin.systemd:
+        name: quagga-zebra.service
         enabled: true
         state: restarted
         daemon_reload: true
 
-- name: Configure routes through inetRouter
-  hosts: internal_nodes
+    - name: Start OSPF
+      ansible.builtin.systemd:
+        name: quagga-ospfd.service
+        enabled: true
+        state: restarted
+
+- name: Check OSPF neighbors
+  hosts: routers
+  become: true
+  tasks:
+    - name: Wait for OSPF neighbors
+      ansible.builtin.command: vtysh -c "show ip ospf neighbor"
+      register: neighbors
+      changed_when: false
+      retries: 20
+      delay: 3
+      until: neighbors.stdout is search("Full")
+
+- name: Check symmetric routing
+  hosts: router1:router3
   become: true
   vars:
     routes:
-      centralRouter:
-        interface: eth1
-        gateway: 192.168.255.1
-      centralServer:
-        interface: eth1
-        gateway: 192.168.100.1
-      inetRouter2:
-        interface: eth2
-        gateway: 192.168.100.1
+      router1:
+        destination: 172.16.3.3/32
+        next_hop: 10.10.10.2
+      router3:
+        destination: 172.16.1.1/32
+        next_hop: 10.10.30.2
   tasks:
-    - name: Save default route
-      ansible.builtin.copy:
-        dest: /etc/netplan/99-otus-route.yaml
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          network:
-            version: 2
-            ethernets:
-              eth0:
-                dhcp4: true
-                dhcp4-overrides:
-                  use-routes: false
-              {{ routes[inventory_hostname].interface }}:
-                routes:
-                  - to: default
-                    via: {{ routes[inventory_hostname].gateway }}
-      register: route_config
-
-    - name: Apply network configuration
-      ansible.builtin.command: netplan apply
-      when: route_config.changed
+    - name: Check route through router2
+      ansible.builtin.command: vtysh -c "show ip route {{ routes[inventory_hostname].destination }}"
+      register: route_result
       changed_when: false
+      retries: 20
+      delay: 3
+      until: route_result.stdout is search(routes[inventory_hostname].next_hop)
 
-- name: Configure inetRouter2
-  hosts: inetRouter2
-  become: true
-  tasks:
-    - name: Create firewall directory
-      ansible.builtin.file:
-        path: /etc/iptables
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
-
-    - name: Save port forwarding rules
-      ansible.builtin.copy:
-        dest: /etc/iptables/otus.rules
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          *filter
-          :INPUT ACCEPT [0:0]
-          :FORWARD DROP [0:0]
-          :OUTPUT ACCEPT [0:0]
-          -A FORWARD -i eth1 -o eth2 -p tcp -d 192.168.100.2 --dport 80 -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
-          -A FORWARD -i eth2 -o eth1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-          COMMIT
-          *nat
-          :PREROUTING ACCEPT [0:0]
-          :INPUT ACCEPT [0:0]
-          :OUTPUT ACCEPT [0:0]
-          :POSTROUTING ACCEPT [0:0]
-          -A PREROUTING -i eth1 -p tcp --dport 8080 -j DNAT --to-destination 192.168.100.2:80
-          -A POSTROUTING -o eth2 -p tcp -d 192.168.100.2 --dport 80 -j MASQUERADE
-          COMMIT
-
-    - name: Save firewall service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-iptables.service
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=iptables rules for OTUS lab
-          Wants=network-online.target
-          After=network-online.target
-
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/sbin/iptables-restore /etc/iptables/otus.rules
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Enable port forwarding firewall
-      ansible.builtin.systemd:
-        name: otus-iptables.service
-        enabled: true
-        state: restarted
-        daemon_reload: true
-
-- name: Check port knocking
-  hosts: centralRouter
-  become: true
-  tasks:
-    - name: Connect to inetRouter through knock script
-      ansible.builtin.command: sudo -u vagrant /home/vagrant/knock.sh hostname
-      register: knock_result
-      changed_when: false
-
-    - name: Check knock result
+    - name: Check route next hop
       ansible.builtin.assert:
-        that: knock_result.stdout == "inet-router"
+        that: route_result.stdout is search(routes[inventory_hostname].next_hop)
+
+- name: Demonstrate asymmetric routing
+  hosts: router3
+  become: true
+  tasks:
+    - name: Make router3 direct link inexpensive
+      ansible.builtin.replace:
+        path: /etc/quagga/ospfd.conf
+        regexp: '(^interface eth1\.20\n ip ospf cost )100$'
+        replace: '\g<1>10'
+
+    - name: Restart OSPF with inexpensive direct link
+      ansible.builtin.systemd:
+        name: quagga-ospfd.service
+        state: restarted
+
+    - name: Wait for direct route from router3 to router1
+      ansible.builtin.command: vtysh -c "show ip route 172.16.1.1/32"
+      register: asymmetric_route
+      changed_when: false
+      retries: 20
+      delay: 3
+      until: asymmetric_route.stdout is search("10.10.20.1")
+
+    - name: Restore expensive direct link
+      ansible.builtin.replace:
+        path: /etc/quagga/ospfd.conf
+        regexp: '(^interface eth1\.20\n ip ospf cost )10$'
+        replace: '\g<1>100'
+
+    - name: Restart OSPF with expensive direct link
+      ansible.builtin.systemd:
+        name: quagga-ospfd.service
+        state: restarted
+
+    - name: Wait for symmetric route from router3 to router1
+      ansible.builtin.command: vtysh -c "show ip route 172.16.1.1/32"
+      register: symmetric_route
+      changed_when: false
+      retries: 20
+      delay: 3
+      until: symmetric_route.stdout is search("10.10.30.2")
+
+    - name: Check symmetric route next hop
+      ansible.builtin.assert:
+        that: symmetric_route.stdout is search("10.10.30.2")

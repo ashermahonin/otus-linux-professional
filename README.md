@@ -1,10 +1,35 @@
-## Задание 21. Iptables
+## Задание 22. Routing
 
 ### Файлы
 
-`Vagrantfile` создает `inetRouter`, `centralRouter`, `centralServer` и `inetRouter2`.
+`Vagrantfile` создает три маршрутизатора.
 
-`ansible/playbook.yml` настраивает маршруты, iptables, nginx и скрипт knocking.
+`ansible/playbook.yml` собирает Quagga 1.2.4, настраивает OSPF и проверяет маршруты.
+
+### Схема
+
+| VLAN | Сеть | Участники |
+| --- | --- | --- |
+| 10 | `10.10.10.0/24` | `router1` `eth1.10` — `10.10.10.1`, `router2` `eth1.10` — `10.10.10.2` |
+| 20 | `10.10.20.0/24` | `router1` `eth2.20` — `10.10.20.1`, `router3` `eth1.20` — `10.10.20.2` |
+| 30 | `10.10.30.0/24` | `router2` `eth2.30` — `10.10.30.2`, `router3` `eth2.30` — `10.10.30.3` |
+
+В VirtualBox для каждой пары маршрутизаторов создана отдельная внутренняя сеть. Ansible поднимает на её интерфейсах VLAN `10`, `20` и `30`; IP-адреса и OSPF работают на интерфейсах с тегом. OSPF работает в area `0`.
+
+В Ubuntu 22.04 пакета Quagga нет, поэтому playbook собирает его из исходников и запускает отдельные службы Zebra и OSPFd.
+
+Для проверки маршрутов на каждом маршрутизаторе добавлен отдельный адрес: `172.16.1.1/32`, `172.16.2.2/32` и `172.16.3.3/32`.
+
+### Маршрутизация
+
+Линки VLAN 10 и VLAN 30 имеют стоимость `10`. Прямой линк VLAN 20 имеет стоимость `100` с обеих сторон. Поэтому маршрут между `router1` и `router3` проходит через `router2` и остается симметричным:
+
+```text
+router1 -> router2 -> router3
+router3 -> router2 -> router1
+```
+
+В playbook отдельно проверяется асимметричный вариант. На `router3` в конфигурации OSPF стоимость `eth1.20` временно меняется на `10`, после чего OSPFd перезапускается. Путь `router3 -> router1` становится прямым через VLAN 20, а путь в обратную сторону продолжает идти через `router2`. Затем стоимость возвращается к `100`, OSPFd запускается повторно и маршрут снова становится симметричным.
 
 ### Запуск
 
@@ -14,18 +39,49 @@ vagrant up
 
 ### Проверка
 
-Проверка SSH через knock script:
+VLAN-интерфейсы на `router1`:
 
 ```bash
-vagrant ssh centralRouter -c "sudo -u vagrant /home/vagrant/knock.sh hostname"
+vagrant ssh router1 -c 'ip -d -br link show type vlan'
 ```
 
-В ответ будет `inet-router`.
+В выводе должны быть `eth1.10` и `eth2.20`. На `router2` создаются `eth1.10` и `eth2.30`, на `router3` — `eth1.20` и `eth2.30`.
 
-Проверка nginx через `inetRouter2` с хостовой машины:
+Состояние соседей OSPF:
 
 ```bash
-curl http://192.168.56.21:8080
+vagrant ssh router1 -c 'sudo vtysh -c "show ip ospf neighbor"'
 ```
 
-В ответ будет `nginx on centralServer`.
+Маршрут `router1` к `router3` должен идти через `10.10.10.2`:
+
+```bash
+vagrant ssh router1 -c 'sudo vtysh -c "show ip route 172.16.3.3/32"'
+```
+
+Маршрут `router3` к `router1` должен идти через `10.10.30.2`:
+
+```bash
+vagrant ssh router3 -c 'sudo vtysh -c "show ip route 172.16.1.1/32"'
+```
+
+Проверка асимметричного маршрута выполняется на `router3`:
+
+```bash
+vagrant ssh router3
+sudo vtysh
+configure terminal
+interface eth1.20
+ip ospf cost 10
+end
+show ip route 172.16.1.1/32
+```
+
+После изменения маршрут идет напрямую через `10.10.20.1`. Возврат к симметричной схеме выполняется так:
+
+```text
+configure terminal
+interface eth1.20
+ip ospf cost 100
+end
+```
