@@ -1,389 +1,369 @@
 ---
-- name: Configure OSPF routers
-  hosts: routers
+- name: Install VPN packages
+  hosts: all
   become: true
-  any_errors_fatal: true
-  vars:
-    quagga_version: 1.2.4
-    quagga_source: /usr/local/src/quagga-1.2.4
-    routers:
-      router1:
-        router_id: 1.1.1.1
-        loopback: 172.16.1.1/32
-        vlans:
-          - parent: eth1
-            name: eth1.10
-            id: 10
-            address: 10.10.10.1/24
-          - parent: eth2
-            name: eth2.20
-            id: 20
-            address: 10.10.20.1/24
-        networks:
-          - 10.10.10.0/24
-          - 10.10.20.0/24
-        interfaces:
-          - name: eth1.10
-            cost: 10
-          - name: eth2.20
-            cost: 100
-      router2:
-        router_id: 2.2.2.2
-        loopback: 172.16.2.2/32
-        vlans:
-          - parent: eth1
-            name: eth1.10
-            id: 10
-            address: 10.10.10.2/24
-          - parent: eth2
-            name: eth2.30
-            id: 30
-            address: 10.10.30.2/24
-        networks:
-          - 10.10.10.0/24
-          - 10.10.30.0/24
-        interfaces:
-          - name: eth1.10
-            cost: 10
-          - name: eth2.30
-            cost: 10
-      router3:
-        router_id: 3.3.3.3
-        loopback: 172.16.3.3/32
-        vlans:
-          - parent: eth1
-            name: eth1.20
-            id: 20
-            address: 10.10.20.2/24
-          - parent: eth2
-            name: eth2.30
-            id: 30
-            address: 10.10.30.3/24
-        networks:
-          - 10.10.20.0/24
-          - 10.10.30.0/24
-        interfaces:
-          - name: eth1.20
-            cost: 100
-          - name: eth2.30
-            cost: 10
-
   tasks:
-    - name: Install Quagga build dependencies
+    - name: Install OpenVPN and iperf3
       ansible.builtin.apt:
         name:
-          - bison
-          - build-essential
-          - flex
-          - libc-ares-dev
-          - libcap-dev
-          - libreadline-dev
-          - pkg-config
-          - texinfo
+          - easy-rsa
+          - iperf3
+          - openvpn
         state: present
         update_cache: true
 
-    - name: Create Quagga user
-      ansible.builtin.user:
-        name: quagga
-        system: true
-        shell: /usr/sbin/nologin
-
-    - name: Download Quagga
-      ansible.builtin.get_url:
-        url: "https://github.com/Quagga/quagga/releases/download/quagga-{{ quagga_version }}/quagga-{{ quagga_version }}.tar.gz"
-        dest: "/usr/local/src/quagga-{{ quagga_version }}.tar.gz"
-        mode: "0644"
-
-    - name: Unpack Quagga
-      ansible.builtin.unarchive:
-        src: "/usr/local/src/quagga-{{ quagga_version }}.tar.gz"
-        dest: /usr/local/src
-        remote_src: true
-        creates: "{{ quagga_source }}/configure"
-
-    - name: Configure Quagga build
-      ansible.builtin.command:
-        cmd: ./configure --prefix=/usr --sysconfdir=/etc/quagga --localstatedir=/var/run/quagga --enable-vtysh --enable-user=quagga --enable-group=quagga
-        chdir: "{{ quagga_source }}"
-        creates: "{{ quagga_source }}/config.status"
-      environment:
-        CFLAGS: -fcommon
-
-    - name: Build Quagga
-      ansible.builtin.command:
-        cmd: make -j2
-        chdir: "{{ quagga_source }}"
-        creates: "{{ quagga_source }}/zebra/.libs/zebra"
-
-    - name: Install Quagga
-      ansible.builtin.command:
-        cmd: make install
-        chdir: "{{ quagga_source }}"
-        creates: /usr/sbin/zebra
-
-    - name: Create Quagga configuration directory
-      ansible.builtin.file:
-        path: /etc/quagga
-        state: directory
-        owner: root
-        group: quagga
-        mode: "0755"
-
-    - name: Create Quagga log directory
-      ansible.builtin.file:
-        path: /var/log/quagga
-        state: directory
-        owner: quagga
-        group: quagga
-        mode: "0755"
-
-    - name: Enable IPv4 forwarding
-      ansible.builtin.copy:
-        dest: /etc/sysctl.d/60-otus-routing.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: "net.ipv4.ip_forward = 1\n"
-      register: forwarding_config
-
-    - name: Apply IPv4 forwarding setting
-      ansible.builtin.command: sysctl --system
-      when: forwarding_config.changed
-      changed_when: false
-
-    - name: Create VLAN interface service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-vlans.service
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=VLAN interfaces for OSPF
-          After=network-online.target
-          Wants=network-online.target
-          Before=otus-loopback.service quagga-zebra.service
-
-          [Service]
-          Type=oneshot
-          {% for vlan in routers[inventory_hostname].vlans %}
-          ExecStart=/usr/sbin/ip address flush dev {{ vlan.parent }}
-          ExecStart=/usr/sbin/ip link set {{ vlan.parent }} up
-          ExecStart=/usr/sbin/ip link add link {{ vlan.parent }} name {{ vlan.name }} type vlan id {{ vlan.id }}
-          ExecStart=/usr/sbin/ip address add {{ vlan.address }} dev {{ vlan.name }}
-          ExecStart=/usr/sbin/ip link set {{ vlan.name }} up
-          {% endfor %}
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Enable VLAN interface service
-      ansible.builtin.systemd:
-        name: otus-vlans.service
-        enabled: true
-        state: started
-        daemon_reload: true
-
-    - name: Create loopback address service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-loopback.service
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=Loopback address for OSPF
-          After=otus-vlans.service
-          Before=quagga-zebra.service
-          Requires=otus-vlans.service
-
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/sbin/ip address replace {{ routers[inventory_hostname].loopback }} dev lo
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Enable loopback address service
-      ansible.builtin.systemd:
-        name: otus-loopback.service
-        enabled: true
-        state: started
-        daemon_reload: true
-
-    - name: Configure Zebra
-      ansible.builtin.copy:
-        dest: /etc/quagga/zebra.conf
-        owner: quagga
-        group: quagga
-        mode: "0640"
-        content: |
-          hostname {{ inventory_hostname }}
-          password zebra
-          enable password zebra
-          log file /var/log/quagga/zebra.log
-
-    - name: Configure OSPF
-      ansible.builtin.copy:
-        dest: /etc/quagga/ospfd.conf
-        owner: quagga
-        group: quagga
-        mode: "0640"
-        content: |
-          hostname {{ inventory_hostname }}
-          password zebra
-          enable password zebra
-          log file /var/log/quagga/ospfd.log
-          {% for interface in routers[inventory_hostname].interfaces %}
-          interface {{ interface.name }}
-           ip ospf cost {{ interface.cost }}
-          !
-          {% endfor %}
-          router ospf
-           ospf router-id {{ routers[inventory_hostname].router_id }}
-           passive-interface eth0
-           network {{ routers[inventory_hostname].loopback }} area 0
-          {% for network in routers[inventory_hostname].networks %}
-           network {{ network }} area 0
-          {% endfor %}
-
-    - name: Create Zebra service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/quagga-zebra.service
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=Quagga Zebra
-          After=network-online.target otus-loopback.service
-          Wants=network-online.target
-          Requires=otus-loopback.service
-
-          [Service]
-          Type=simple
-          ExecStartPre=/usr/bin/install -d -o quagga -g quagga -m 0755 /run/quagga
-          ExecStart=/usr/sbin/zebra -f /etc/quagga/zebra.conf -A 127.0.0.1
-          Restart=on-failure
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Create OSPF service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/quagga-ospfd.service
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          [Unit]
-          Description=Quagga OSPF
-          After=quagga-zebra.service
-          Requires=quagga-zebra.service
-
-          [Service]
-          Type=simple
-          ExecStartPre=/usr/bin/install -d -o quagga -g quagga -m 0755 /run/quagga
-          ExecStart=/usr/sbin/ospfd -f /etc/quagga/ospfd.conf -A 127.0.0.1
-          Restart=on-failure
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Start Zebra
-      ansible.builtin.systemd:
-        name: quagga-zebra.service
-        enabled: true
-        state: restarted
-        daemon_reload: true
-
-    - name: Start OSPF
-      ansible.builtin.systemd:
-        name: quagga-ospfd.service
-        enabled: true
-        state: restarted
-
-- name: Check OSPF neighbors
-  hosts: routers
-  become: true
-  tasks:
-    - name: Wait for OSPF neighbors
-      ansible.builtin.command: vtysh -c "show ip ospf neighbor"
-      register: neighbors
-      changed_when: false
-      retries: 20
-      delay: 3
-      until: neighbors.stdout is search("Full")
-
-- name: Check symmetric routing
-  hosts: router1:router3
+- name: Create certificates on VPN server
+  hosts: vpn_server
   become: true
   vars:
-    routes:
-      router1:
-        destination: 172.16.3.3/32
-        next_hop: 10.10.10.2
-      router3:
-        destination: 172.16.1.1/32
-        next_hop: 10.10.30.2
+    pki_dir: /etc/openvpn/easy-rsa
   tasks:
-    - name: Check route through router2
-      ansible.builtin.command: vtysh -c "show ip route {{ routes[inventory_hostname].destination }}"
-      register: route_result
-      changed_when: false
-      retries: 20
-      delay: 3
-      until: route_result.stdout is search(routes[inventory_hostname].next_hop)
+    - name: Create Easy-RSA directory
+      ansible.builtin.file:
+        path: "{{ pki_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
 
-    - name: Check route next hop
-      ansible.builtin.assert:
-        that: route_result.stdout is search(routes[inventory_hostname].next_hop)
+    - name: Initialize PKI
+      ansible.builtin.command:
+        cmd: /usr/share/easy-rsa/easyrsa init-pki
+        chdir: "{{ pki_dir }}"
+        creates: "{{ pki_dir }}/pki"
 
-- name: Demonstrate asymmetric routing
-  hosts: router3
+    - name: Create certificate authority
+      ansible.builtin.command:
+        cmd: /usr/share/easy-rsa/easyrsa build-ca nopass
+        chdir: "{{ pki_dir }}"
+        creates: "{{ pki_dir }}/pki/ca.crt"
+      environment:
+        EASYRSA_ALGO: ec
+        EASYRSA_BATCH: "1"
+        EASYRSA_REQ_CN: otus23-ca
+
+    - name: Create server certificate
+      ansible.builtin.command:
+        cmd: /usr/share/easy-rsa/easyrsa build-server-full vpn-server nopass
+        chdir: "{{ pki_dir }}"
+        creates: "{{ pki_dir }}/pki/issued/vpn-server.crt"
+      environment:
+        EASYRSA_ALGO: ec
+        EASYRSA_BATCH: "1"
+
+    - name: Create VPN client certificate
+      ansible.builtin.command:
+        cmd: /usr/share/easy-rsa/easyrsa build-client-full vpn-client nopass
+        chdir: "{{ pki_dir }}"
+        creates: "{{ pki_dir }}/pki/issued/vpn-client.crt"
+      environment:
+        EASYRSA_ALGO: ec
+        EASYRSA_BATCH: "1"
+
+    - name: Create RAS client certificate
+      ansible.builtin.command:
+        cmd: /usr/share/easy-rsa/easyrsa build-client-full mac-client nopass
+        chdir: "{{ pki_dir }}"
+        creates: "{{ pki_dir }}/pki/issued/mac-client.crt"
+      environment:
+        EASYRSA_ALGO: ec
+        EASYRSA_BATCH: "1"
+
+    - name: Create OpenVPN key directory
+      ansible.builtin.file:
+        path: /etc/openvpn/pki
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install server certificate files
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - src: "{{ pki_dir }}/pki/ca.crt"
+          dest: /etc/openvpn/pki/ca.crt
+          mode: "0644"
+        - src: "{{ pki_dir }}/pki/issued/vpn-server.crt"
+          dest: /etc/openvpn/pki/server.crt
+          mode: "0644"
+        - src: "{{ pki_dir }}/pki/private/vpn-server.key"
+          dest: /etc/openvpn/pki/server.key
+          mode: "0600"
+
+    - name: Read certificate authority
+      ansible.builtin.slurp:
+        src: "{{ pki_dir }}/pki/ca.crt"
+      register: pki_ca
+
+    - name: Read VPN client certificate
+      ansible.builtin.slurp:
+        src: "{{ pki_dir }}/pki/issued/vpn-client.crt"
+      register: pki_vpn_client_crt
+
+    - name: Read VPN client key
+      ansible.builtin.slurp:
+        src: "{{ pki_dir }}/pki/private/vpn-client.key"
+      register: pki_vpn_client_key
+
+    - name: Read RAS client certificate
+      ansible.builtin.slurp:
+        src: "{{ pki_dir }}/pki/issued/mac-client.crt"
+      register: pki_ras_client_crt
+
+    - name: Read RAS client key
+      ansible.builtin.slurp:
+        src: "{{ pki_dir }}/pki/private/mac-client.key"
+      register: pki_ras_client_key
+
+- name: Configure OpenVPN server
+  hosts: vpn_server
   become: true
   tasks:
-    - name: Make router3 direct link inexpensive
-      ansible.builtin.replace:
-        path: /etc/quagga/ospfd.conf
-        regexp: '(^interface eth1\.20\n ip ospf cost )100$'
-        replace: '\g<1>10'
+    - name: Create TAP bridge service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/otus-tap-bridge.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Bridge for OpenVPN TAP mode
+          Before=openvpn-server@server-tap.service
 
-    - name: Restart OSPF with inexpensive direct link
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/sbin/ip link add br-tap type bridge
+          ExecStart=/usr/sbin/ip address add 10.9.0.1/24 dev br-tap
+          ExecStart=/usr/sbin/ip link set br-tap up
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Create TAP bridge attachment script
+      ansible.builtin.copy:
+        dest: /etc/openvpn/server/tap-up.sh
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          /usr/sbin/ip link set "$dev" master br-tap
+          /usr/sbin/ip link set "$dev" up
+
+    - name: Create TUN server configuration
+      ansible.builtin.copy:
+        dest: /etc/openvpn/server/server-tun.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          port 1194
+          proto udp
+          dev tun0
+          topology subnet
+          server 10.8.0.0 255.255.255.0
+          ca /etc/openvpn/pki/ca.crt
+          cert /etc/openvpn/pki/server.crt
+          key /etc/openvpn/pki/server.key
+          dh none
+          data-ciphers AES-256-GCM
+          data-ciphers-fallback AES-256-GCM
+          keepalive 10 60
+          persist-key
+          persist-tun
+          user nobody
+          group nogroup
+          status /run/openvpn-server/status-tun.log
+          verb 3
+
+    - name: Create TAP server configuration
+      ansible.builtin.copy:
+        dest: /etc/openvpn/server/server-tap.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          port 1195
+          proto udp
+          dev tap0
+          server-bridge 10.9.0.1 255.255.255.0 10.9.0.100 10.9.0.200
+          ca /etc/openvpn/pki/ca.crt
+          cert /etc/openvpn/pki/server.crt
+          key /etc/openvpn/pki/server.key
+          dh none
+          data-ciphers AES-256-GCM
+          data-ciphers-fallback AES-256-GCM
+          script-security 2
+          up /etc/openvpn/server/tap-up.sh
+          keepalive 10 60
+          persist-key
+          persist-tun
+          user nobody
+          group nogroup
+          status /run/openvpn-server/status-tap.log
+          verb 3
+
+    - name: Enable TAP bridge
       ansible.builtin.systemd:
-        name: quagga-ospfd.service
-        state: restarted
+        name: otus-tap-bridge.service
+        enabled: true
+        state: started
+        daemon_reload: true
 
-    - name: Wait for direct route from router3 to router1
-      ansible.builtin.command: vtysh -c "show ip route 172.16.1.1/32"
-      register: asymmetric_route
-      changed_when: false
-      retries: 20
-      delay: 3
-      until: asymmetric_route.stdout is search("10.10.20.1")
-
-    - name: Restore expensive direct link
-      ansible.builtin.replace:
-        path: /etc/quagga/ospfd.conf
-        regexp: '(^interface eth1\.20\n ip ospf cost )10$'
-        replace: '\g<1>100'
-
-    - name: Restart OSPF with expensive direct link
+    - name: Start OpenVPN server services
       ansible.builtin.systemd:
-        name: quagga-ospfd.service
+        name: "{{ item }}"
+        enabled: true
         state: restarted
+      loop:
+        - openvpn-server@server-tun.service
+        - openvpn-server@server-tap.service
 
-    - name: Wait for symmetric route from router3 to router1
-      ansible.builtin.command: vtysh -c "show ip route 172.16.1.1/32"
-      register: symmetric_route
+    - name: Create RAS profile on VPN server
+      ansible.builtin.copy:
+        dest: /tmp/ras-client.ovpn
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          client
+          dev tun
+          proto udp
+          remote 127.0.0.1 1194
+          nobind
+          persist-key
+          persist-tun
+          remote-cert-tls server
+          data-ciphers AES-256-GCM
+          data-ciphers-fallback AES-256-GCM
+          verb 3
+          <ca>
+          {{ pki_ca.content | b64decode | trim }}
+          </ca>
+          <cert>
+          {{ pki_ras_client_crt.content | b64decode | trim }}
+          </cert>
+          <key>
+          {{ pki_ras_client_key.content | b64decode | trim }}
+          </key>
+
+    - name: Create temporary profile directory on control host
+      ansible.builtin.file:
+        path: /private/tmp/otus23
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Fetch RAS profile to control host
+      ansible.builtin.fetch:
+        src: /tmp/ras-client.ovpn
+        dest: /private/tmp/otus23/ras-client.ovpn
+        flat: true
+
+- name: Configure VPN client
+  hosts: vpn_client
+  become: true
+  tasks:
+    - name: Create OpenVPN key directory
+      ansible.builtin.file:
+        path: /etc/openvpn/pki
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Install VPN client certificate files
+      ansible.builtin.copy:
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+        content: "{{ item.content }}"
+      loop:
+        - dest: /etc/openvpn/pki/ca.crt
+          mode: "0644"
+          content: "{{ hostvars['vpn-server'].pki_ca.content | b64decode }}"
+        - dest: /etc/openvpn/pki/client.crt
+          mode: "0644"
+          content: "{{ hostvars['vpn-server'].pki_vpn_client_crt.content | b64decode }}"
+        - dest: /etc/openvpn/pki/client.key
+          mode: "0600"
+          content: "{{ hostvars['vpn-server'].pki_vpn_client_key.content | b64decode }}"
+
+    - name: Create TUN client configuration
+      ansible.builtin.copy:
+        dest: /etc/openvpn/client/vpn-tun.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          client
+          dev tun0
+          proto udp
+          remote 192.168.56.10 1194
+          nobind
+          persist-key
+          persist-tun
+          remote-cert-tls server
+          ca /etc/openvpn/pki/ca.crt
+          cert /etc/openvpn/pki/client.crt
+          key /etc/openvpn/pki/client.key
+          data-ciphers AES-256-GCM
+          data-ciphers-fallback AES-256-GCM
+          verb 3
+
+    - name: Create TAP client configuration
+      ansible.builtin.copy:
+        dest: /etc/openvpn/client/vpn-tap.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          client
+          dev tap0
+          proto udp
+          remote 192.168.56.10 1195
+          nobind
+          persist-key
+          persist-tun
+          remote-cert-tls server
+          ca /etc/openvpn/pki/ca.crt
+          cert /etc/openvpn/pki/client.crt
+          key /etc/openvpn/pki/client.key
+          data-ciphers AES-256-GCM
+          data-ciphers-fallback AES-256-GCM
+          verb 3
+
+    - name: Start OpenVPN client services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: restarted
+      loop:
+        - openvpn-client@vpn-tun.service
+        - openvpn-client@vpn-tap.service
+
+    - name: Check TUN connection
+      ansible.builtin.command: ping -c 2 -W 2 10.8.0.1
+      register: tun_ping
       changed_when: false
-      retries: 20
-      delay: 3
-      until: symmetric_route.stdout is search("10.10.30.2")
+      retries: 15
+      delay: 2
+      until: tun_ping.rc == 0
 
-    - name: Check symmetric route next hop
-      ansible.builtin.assert:
-        that: symmetric_route.stdout is search("10.10.30.2")
+    - name: Check TAP connection
+      ansible.builtin.command: ping -c 2 -W 2 10.9.0.1
+      register: tap_ping
+      changed_when: false
+      retries: 15
+      delay: 2
+      until: tap_ping.rc == 0
