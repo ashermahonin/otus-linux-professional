@@ -72,5 +72,3 @@ sudo /opt/homebrew/opt/openvpn/sbin/openvpn --config /private/tmp/otus23/ras-cli
 ```
 
 После подключения сервер доступен по адресу `10.8.0.1`.
-
-`ocserv` не настраивался: это дополнительная часть задания.
