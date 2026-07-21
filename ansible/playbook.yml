@@ -1,295 +1,163 @@
 ---
-- name: Install network tools
-  hosts: all
-  become: true
-  tasks:
-    - name: Install ping
-      ansible.builtin.apt:
-        name: iputils-ping
-        state: present
-        update_cache: true
-
-- name: Configure VLAN 10
-  hosts: vlan10
+- name: Configure FreeIPA server
+  hosts: ipa_server
   become: true
   vars:
-    vlan_addresses:
-      testClient1: 10.10.10.254/24
-      testServer1: 10.10.10.1/24
+    ipa_server_name: ipa.otus.test
+    ipa_server_ip: 192.168.56.10
+    ipa_client_name: client.otus.test
+    ipa_client_ip: 192.168.56.20
+    ipa_domain: otus.test
+    ipa_realm: OTUS.TEST
+    ipa_dm_password: DirectoryManager123
+    ipa_admin_password: Admin12345
   tasks:
-    - name: Configure VLAN 10 interface
+    - name: Set FreeIPA server hostname
+      ansible.builtin.command: hostnamectl set-hostname {{ ipa_server_name }}
+      changed_when: false
+
+    - name: Set local host records
       ansible.builtin.copy:
-        dest: /etc/netplan/99-otus-vlan10.yaml
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          network:
-            version: 2
-            ethernets:
-              eth1:
-                dhcp4: false
-                optional: true
-            vlans:
-              vlan10:
-                id: 10
-                link: eth1
-                addresses:
-                  - {{ vlan_addresses[inventory_hostname] }}
-
-    - name: Apply VLAN 10 configuration
-      ansible.builtin.command: netplan apply
-      changed_when: false
-
-- name: Configure VLAN 20
-  hosts: vlan20
-  become: true
-  vars:
-    vlan_addresses:
-      testClient2: 10.10.10.254/24
-      testServer2: 10.10.10.1/24
-  tasks:
-    - name: Configure VLAN 20 interface
-      ansible.builtin.copy:
-        dest: /etc/netplan/99-otus-vlan20.yaml
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          network:
-            version: 2
-            ethernets:
-              eth1:
-                dhcp4: false
-                optional: true
-            vlans:
-              vlan20:
-                id: 20
-                link: eth1
-                addresses:
-                  - {{ vlan_addresses[inventory_hostname] }}
-
-    - name: Apply VLAN 20 configuration
-      ansible.builtin.command: netplan apply
-      changed_when: false
-
-- name: Configure LACP switch
-  hosts: lacp_switch
-  become: true
-  tasks:
-    - name: Install Open vSwitch
-      ansible.builtin.apt:
-        name: openvswitch-switch
-        state: present
-
-    - name: Configure switch interfaces without addresses
-      ansible.builtin.copy:
-        dest: /etc/netplan/99-otus-lacp-switch.yaml
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          network:
-            version: 2
-            ethernets:
-              eth1:
-                dhcp4: false
-                optional: true
-              eth2:
-                dhcp4: false
-                optional: true
-              eth3:
-                dhcp4: false
-                optional: true
-              eth4:
-                dhcp4: false
-                optional: true
-
-    - name: Apply switch network configuration
-      ansible.builtin.command: netplan apply
-      changed_when: false
-
-    - name: Start Open vSwitch
-      ansible.builtin.service:
-        name: openvswitch-switch
-        enabled: true
-        state: started
-
-    - name: Create Open vSwitch bridge
-      ansible.builtin.command:
-        argv:
-          - ovs-vsctl
-          - --may-exist
-          - add-br
-          - br-lacp
-      changed_when: false
-
-    - name: Create LACP port for centralRouter
-      ansible.builtin.command:
-        argv:
-          - ovs-vsctl
-          - --may-exist
-          - add-bond
-          - br-lacp
-          - central-bond
-          - eth1
-          - eth2
-          - lacp=active
-          - bond_mode=balance-tcp
-      changed_when: false
-
-    - name: Create LACP port for inetRouter
-      ansible.builtin.command:
-        argv:
-          - ovs-vsctl
-          - --may-exist
-          - add-bond
-          - br-lacp
-          - inet-bond
-          - eth3
-          - eth4
-          - lacp=active
-          - bond_mode=balance-tcp
-      changed_when: false
-
-    - name: Set fast LACP timer on switch ports
-      ansible.builtin.command:
-        argv:
-          - ovs-vsctl
-          - set
-          - port
-          - "{{ item }}"
-          - other_config:lacp-time=fast
-      loop:
-        - central-bond
-        - inet-bond
-      changed_when: false
-
-- name: Configure LACP bond
-  hosts: bond_routers
-  become: true
-  vars:
-    bond_addresses:
-      inetRouter: 172.16.25.1/30
-      centralRouter: 172.16.25.2/30
-  tasks:
-    - name: Load bonding module
-      ansible.builtin.command: modprobe bonding
-      changed_when: false
-
-    - name: Load bonding module at boot
-      ansible.builtin.copy:
-        dest: /etc/modules-load.d/bonding.conf
+        dest: /etc/hosts
         owner: root
         group: root
         mode: "0644"
         content: |
-          bonding
+          127.0.0.1 localhost localhost.localdomain
+          {{ ipa_server_ip }} {{ ipa_server_name }} ipa
+          {{ ipa_client_ip }} {{ ipa_client_name }} client
 
-    - name: Configure LACP bond
+    - name: Install FreeIPA server packages
+      ansible.builtin.dnf:
+        name:
+          - ipa-server
+          - ipa-server-dns
+        state: present
+
+    - name: Start firewall service
+      ansible.builtin.service:
+        name: firewalld
+        enabled: true
+        state: started
+
+    - name: Install FreeIPA server
+      ansible.builtin.command:
+        argv:
+          - ipa-server-install
+          - --unattended
+          - --hostname={{ ipa_server_name }}
+          - --domain={{ ipa_domain }}
+          - --realm={{ ipa_realm }}
+          - --ds-password={{ ipa_dm_password }}
+          - --admin-password={{ ipa_admin_password }}
+          - --setup-dns
+          - --no-forwarders
+          - --no-ntp
+      args:
+        creates: /etc/ipa/default.conf
+      no_log: true
+
+    - name: Allow FreeIPA services in firewall
+      ansible.builtin.command: firewall-cmd --permanent --add-service={{ item }}
+      loop:
+        - freeipa-ldap
+        - dns
+      register: firewall_rule
+      changed_when: "'success' in firewall_rule.stdout"
+
+    - name: Reload firewall rules
+      ansible.builtin.command: firewall-cmd --reload
+      changed_when: false
+
+    - name: Get Kerberos ticket for FreeIPA admin
+      ansible.builtin.shell: >-
+        printf '%s\n' '{{ ipa_admin_password }}' |
+        kinit admin
+      changed_when: false
+      no_log: true
+
+    - name: Add test user to FreeIPA
+      ansible.builtin.command:
+        argv:
+          - ipa
+          - user-add
+          - otususer
+          - --first=Otus
+          - --last=User
+          - --email=otususer@{{ ipa_domain }}
+      register: ipa_user
+      changed_when: ipa_user.rc == 0
+      failed_when: ipa_user.rc != 0 and "already exists" not in ipa_user.stderr
+
+- name: Configure FreeIPA client
+  hosts: ipa_clients
+  become: true
+  vars:
+    ipa_server_name: ipa.otus.test
+    ipa_server_ip: 192.168.56.10
+    ipa_client_name: client.otus.test
+    ipa_client_ip: 192.168.56.20
+    ipa_domain: otus.test
+    ipa_realm: OTUS.TEST
+    ipa_admin_password: Admin12345
+  tasks:
+    - name: Set FreeIPA client hostname
+      ansible.builtin.command: hostnamectl set-hostname {{ ipa_client_name }}
+      changed_when: false
+
+    - name: Set local host records
       ansible.builtin.copy:
-        dest: /etc/netplan/99-otus-bond.yaml
+        dest: /etc/hosts
         owner: root
         group: root
-        mode: "0600"
+        mode: "0644"
         content: |
-          network:
-            version: 2
-            ethernets:
-              eth1:
-                dhcp4: false
-                optional: true
-              eth2:
-                dhcp4: false
-                optional: true
-            bonds:
-              bond0:
-                interfaces:
-                  - eth1
-                  - eth2
-                addresses:
-                  - {{ bond_addresses[inventory_hostname] }}
-                parameters:
-                  mode: 802.3ad
-                  mii-monitor-interval: 100
-                  lacp-rate: fast
-                  transmit-hash-policy: layer3+4
+          127.0.0.1 localhost localhost.localdomain
+          {{ ipa_server_ip }} {{ ipa_server_name }} ipa
+          {{ ipa_client_ip }} {{ ipa_client_name }} client
 
-    - name: Apply LACP configuration
-      ansible.builtin.command: netplan apply
+    - name: Install FreeIPA client package
+      ansible.builtin.dnf:
+        name: ipa-client
+        state: present
+
+    - name: Set FreeIPA DNS server for client
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/conf.d/90-ipa-dns.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [main]
+          dns=none
+
+    - name: Write client resolver configuration
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          search {{ ipa_domain }}
+          nameserver {{ ipa_server_ip }}
+
+    - name: Join FreeIPA domain
+      ansible.builtin.command:
+        argv:
+          - ipa-client-install
+          - --unattended
+          - --domain={{ ipa_domain }}
+          - --realm={{ ipa_realm }}
+          - --server={{ ipa_server_name }}
+          - --principal=admin
+          - --password={{ ipa_admin_password }}
+          - --mkhomedir
+          - --no-ntp
+          - --force-join
+      args:
+        creates: /etc/ipa/default.conf
+      no_log: true
+
+    - name: Check FreeIPA user on client
+      ansible.builtin.command: getent passwd otususer
       changed_when: false
-
-    - name: Enable promiscuous mode for LACP links
-      ansible.builtin.command: ip link set dev {{ item }} promisc on
-      loop:
-        - eth1
-        - eth2
-      changed_when: false
-
-    - name: Read bond status
-      ansible.builtin.command: cat /proc/net/bonding/bond0
-      register: bond_status
-      changed_when: false
-      retries: 20
-      delay: 2
-      until:
-        - "'Partner Mac Address:' in bond_status.stdout"
-        - "'Partner Mac Address: 00:00:00:00:00:00' not in bond_status.stdout"
-
-    - name: Check LACP mode and slave links
-      ansible.builtin.assert:
-        that:
-          - "'IEEE 802.3ad Dynamic link aggregation' in bond_status.stdout"
-          - "'Slave Interface: eth1' in bond_status.stdout"
-          - "'Slave Interface: eth2' in bond_status.stdout"
-          - "'Partner Mac Address: 00:00:00:00:00:00' not in bond_status.stdout"
-
-    - name: Check connection through LACP bond
-      ansible.builtin.command: >-
-        ping -I bond0 -c 2 -W 2
-        {{ '172.16.25.2' if inventory_hostname == 'inetRouter' else '172.16.25.1' }}
-      changed_when: false
-      register: bond_ping
-      retries: 10
-      delay: 2
-      until: bond_ping.rc == 0
-
-- name: Check VLAN 10
-  hosts: testClient1
-  become: true
-  tasks:
-    - name: Ping server in VLAN 10
-      ansible.builtin.command: ping -c 2 -W 2 10.10.10.1
-      changed_when: false
-
-- name: Check VLAN 20
-  hosts: testClient2
-  become: true
-  tasks:
-    - name: Ping server in VLAN 20
-      ansible.builtin.command: ping -c 2 -W 2 10.10.10.1
-      changed_when: false
-
-- name: Check LACP failover
-  hosts: centralRouter
-  become: true
-  tasks:
-    - name: Ping inetRouter through bond before link loss
-      ansible.builtin.command: ping -I bond0 -c 2 -W 2 172.16.25.1
-      changed_when: false
-
-    - name: Check bond after disabling first link
-      block:
-        - name: Disable first bond link
-          ansible.builtin.command: ip link set eth1 down
-
-        - name: Ping inetRouter through remaining link
-          ansible.builtin.command: ping -I bond0 -c 2 -W 2 172.16.25.1
-          changed_when: false
-          register: failover_ping
-          retries: 10
-          delay: 2
-          until: failover_ping.rc == 0
-      always:
-        - name: Enable first bond link
-          ansible.builtin.command: ip link set eth1 up
