@@ -1,369 +1,175 @@
 ---
-- name: Install VPN packages
+- name: Install DNS packages
   hosts: all
   become: true
   tasks:
-    - name: Install OpenVPN and iperf3
+    - name: Install required packages
       ansible.builtin.apt:
         name:
-          - easy-rsa
-          - iperf3
-          - openvpn
+          - bind9
+          - bind9utils
+          - dnsutils
         state: present
         update_cache: true
 
-- name: Create certificates on VPN server
-  hosts: vpn_server
+- name: Configure DNS servers
+  hosts: dns_servers
   become: true
   vars:
-    pki_dir: /etc/openvpn/easy-rsa
+    dns_server_ips:
+      ns01: 192.168.50.10
+      ns02: 192.168.50.11
   tasks:
-    - name: Create Easy-RSA directory
-      ansible.builtin.file:
-        path: "{{ pki_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
-
-    - name: Initialize PKI
-      ansible.builtin.command:
-        cmd: /usr/share/easy-rsa/easyrsa init-pki
-        chdir: "{{ pki_dir }}"
-        creates: "{{ pki_dir }}/pki"
-
-    - name: Create certificate authority
-      ansible.builtin.command:
-        cmd: /usr/share/easy-rsa/easyrsa build-ca nopass
-        chdir: "{{ pki_dir }}"
-        creates: "{{ pki_dir }}/pki/ca.crt"
-      environment:
-        EASYRSA_ALGO: ec
-        EASYRSA_BATCH: "1"
-        EASYRSA_REQ_CN: otus23-ca
-
-    - name: Create server certificate
-      ansible.builtin.command:
-        cmd: /usr/share/easy-rsa/easyrsa build-server-full vpn-server nopass
-        chdir: "{{ pki_dir }}"
-        creates: "{{ pki_dir }}/pki/issued/vpn-server.crt"
-      environment:
-        EASYRSA_ALGO: ec
-        EASYRSA_BATCH: "1"
-
-    - name: Create VPN client certificate
-      ansible.builtin.command:
-        cmd: /usr/share/easy-rsa/easyrsa build-client-full vpn-client nopass
-        chdir: "{{ pki_dir }}"
-        creates: "{{ pki_dir }}/pki/issued/vpn-client.crt"
-      environment:
-        EASYRSA_ALGO: ec
-        EASYRSA_BATCH: "1"
-
-    - name: Create RAS client certificate
-      ansible.builtin.command:
-        cmd: /usr/share/easy-rsa/easyrsa build-client-full mac-client nopass
-        chdir: "{{ pki_dir }}"
-        creates: "{{ pki_dir }}/pki/issued/mac-client.crt"
-      environment:
-        EASYRSA_ALGO: ec
-        EASYRSA_BATCH: "1"
-
-    - name: Create OpenVPN key directory
-      ansible.builtin.file:
-        path: /etc/openvpn/pki
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
-
-    - name: Install server certificate files
+    - name: Write main BIND configuration
       ansible.builtin.copy:
-        src: "{{ item.src }}"
-        dest: "{{ item.dest }}"
-        remote_src: true
+        dest: /etc/bind/named.conf
         owner: root
-        group: root
-        mode: "{{ item.mode }}"
-      loop:
-        - src: "{{ pki_dir }}/pki/ca.crt"
-          dest: /etc/openvpn/pki/ca.crt
-          mode: "0644"
-        - src: "{{ pki_dir }}/pki/issued/vpn-server.crt"
-          dest: /etc/openvpn/pki/server.crt
-          mode: "0644"
-        - src: "{{ pki_dir }}/pki/private/vpn-server.key"
-          dest: /etc/openvpn/pki/server.key
-          mode: "0600"
-
-    - name: Read certificate authority
-      ansible.builtin.slurp:
-        src: "{{ pki_dir }}/pki/ca.crt"
-      register: pki_ca
-
-    - name: Read VPN client certificate
-      ansible.builtin.slurp:
-        src: "{{ pki_dir }}/pki/issued/vpn-client.crt"
-      register: pki_vpn_client_crt
-
-    - name: Read VPN client key
-      ansible.builtin.slurp:
-        src: "{{ pki_dir }}/pki/private/vpn-client.key"
-      register: pki_vpn_client_key
-
-    - name: Read RAS client certificate
-      ansible.builtin.slurp:
-        src: "{{ pki_dir }}/pki/issued/mac-client.crt"
-      register: pki_ras_client_crt
-
-    - name: Read RAS client key
-      ansible.builtin.slurp:
-        src: "{{ pki_dir }}/pki/private/mac-client.key"
-      register: pki_ras_client_key
-
-- name: Configure OpenVPN server
-  hosts: vpn_server
-  become: true
-  tasks:
-    - name: Create TAP bridge service
-      ansible.builtin.copy:
-        dest: /etc/systemd/system/otus-tap-bridge.service
-        owner: root
-        group: root
+        group: bind
         mode: "0644"
         content: |
-          [Unit]
-          Description=Bridge for OpenVPN TAP mode
-          Before=openvpn-server@server-tap.service
+          include "/etc/bind/named.conf.options";
+          include "/etc/bind/named.conf.local";
 
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/sbin/ip link add br-tap type bridge
-          ExecStart=/usr/sbin/ip address add 10.9.0.1/24 dev br-tap
-          ExecStart=/usr/sbin/ip link set br-tap up
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-
-    - name: Create TAP bridge attachment script
+    - name: Write BIND options
       ansible.builtin.copy:
-        dest: /etc/openvpn/server/tap-up.sh
+        dest: /etc/bind/named.conf.options
+        owner: root
+        group: bind
+        mode: "0644"
+        content: |
+          options {
+              directory "/var/cache/bind";
+              listen-on { 127.0.0.1; {{ dns_server_ips[inventory_hostname] }}; };
+              listen-on-v6 { none; };
+              recursion no;
+              allow-query { any; };
+              dnssec-validation no;
+          };
+
+    - name: Write split DNS configuration
+      ansible.builtin.copy:
+        dest: /etc/bind/named.conf.local
+        owner: root
+        group: bind
+        mode: "0644"
+        content: |
+          acl client1 { 192.168.50.15; };
+          acl client2 { 192.168.50.16; };
+
+          view "client1" {
+              match-clients { client1; };
+
+              zone "dns.lab" {
+                  type master;
+                  file "/etc/bind/db.dns.lab.client1";
+              };
+
+              zone "newdns.lab" {
+                  type master;
+                  file "/etc/bind/db.newdns.lab";
+              };
+          };
+
+          view "client2" {
+              match-clients { client2; };
+
+              zone "dns.lab" {
+                  type master;
+                  file "/etc/bind/db.dns.lab.client2";
+              };
+          };
+
+    - name: Write DNS zones
+      ansible.builtin.copy:
+        dest: "/etc/bind/{{ item.name }}"
+        owner: root
+        group: bind
+        mode: "0644"
+        content: "{{ item.content }}"
+      loop:
+        - name: db.dns.lab.client1
+          content: |
+            $TTL 3600
+            $ORIGIN dns.lab.
+            @ IN SOA ns01.dns.lab. root.dns.lab. (
+                2026071901 3600 600 86400 3600
+            )
+            @ IN NS ns01.dns.lab.
+            ns01 IN A 192.168.50.10
+            web1 IN A 192.168.50.15
+
+        - name: db.dns.lab.client2
+          content: |
+            $TTL 3600
+            $ORIGIN dns.lab.
+            @ IN SOA ns01.dns.lab. root.dns.lab. (
+                2026071901 3600 600 86400 3600
+            )
+            @ IN NS ns01.dns.lab.
+            ns01 IN A 192.168.50.10
+            web2 IN A 192.168.50.16
+
+        - name: db.newdns.lab
+          content: |
+            $TTL 3600
+            $ORIGIN newdns.lab.
+            @ IN SOA ns01.newdns.lab. root.newdns.lab. (
+                2026071901 3600 600 86400 3600
+            )
+            @ IN NS ns01.newdns.lab.
+            ns01 IN A 192.168.50.10
+            www IN A 192.168.50.15
+            www IN A 192.168.50.16
+
+    - name: Check BIND configuration
+      ansible.builtin.command: named-checkconf
+      changed_when: false
+
+    - name: Check DNS zones
+      ansible.builtin.command:
+        argv:
+          - named-checkzone
+          - "{{ item.zone }}"
+          - "/etc/bind/{{ item.file }}"
+      loop:
+        - zone: dns.lab
+          file: db.dns.lab.client1
+        - zone: dns.lab
+          file: db.dns.lab.client2
+        - zone: newdns.lab
+          file: db.newdns.lab
+      changed_when: false
+
+    - name: Enable and restart BIND
+      ansible.builtin.service:
+        name: bind9
+        state: restarted
+        enabled: true
+
+- name: Configure DNS clients
+  hosts: clients
+  become: true
+  tasks:
+    - name: Create systemd-resolved configuration directory
+      ansible.builtin.file:
+        path: /etc/systemd/resolved.conf.d
+        state: directory
         owner: root
         group: root
         mode: "0755"
-        content: |
-          #!/bin/sh
-          /usr/sbin/ip link set "$dev" master br-tap
-          /usr/sbin/ip link set "$dev" up
 
-    - name: Create TUN server configuration
+    - name: Set DNS servers on clients
       ansible.builtin.copy:
-        dest: /etc/openvpn/server/server-tun.conf
+        dest: /etc/systemd/resolved.conf.d/dns.conf
         owner: root
         group: root
         mode: "0644"
         content: |
-          port 1194
-          proto udp
-          dev tun0
-          topology subnet
-          server 10.8.0.0 255.255.255.0
-          ca /etc/openvpn/pki/ca.crt
-          cert /etc/openvpn/pki/server.crt
-          key /etc/openvpn/pki/server.key
-          dh none
-          data-ciphers AES-256-GCM
-          data-ciphers-fallback AES-256-GCM
-          keepalive 10 60
-          persist-key
-          persist-tun
-          user nobody
-          group nogroup
-          status /run/openvpn-server/status-tun.log
-          verb 3
+          [Resolve]
+          DNS=192.168.50.10 192.168.50.11
+          Domains=dns.lab newdns.lab
 
-    - name: Create TAP server configuration
-      ansible.builtin.copy:
-        dest: /etc/openvpn/server/server-tap.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          port 1195
-          proto udp
-          dev tap0
-          server-bridge 10.9.0.1 255.255.255.0 10.9.0.100 10.9.0.200
-          ca /etc/openvpn/pki/ca.crt
-          cert /etc/openvpn/pki/server.crt
-          key /etc/openvpn/pki/server.key
-          dh none
-          data-ciphers AES-256-GCM
-          data-ciphers-fallback AES-256-GCM
-          script-security 2
-          up /etc/openvpn/server/tap-up.sh
-          keepalive 10 60
-          persist-key
-          persist-tun
-          user nobody
-          group nogroup
-          status /run/openvpn-server/status-tap.log
-          verb 3
-
-    - name: Enable TAP bridge
-      ansible.builtin.systemd:
-        name: otus-tap-bridge.service
-        enabled: true
-        state: started
-        daemon_reload: true
-
-    - name: Start OpenVPN server services
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        enabled: true
+    - name: Restart systemd-resolved
+      ansible.builtin.service:
+        name: systemd-resolved
         state: restarted
-      loop:
-        - openvpn-server@server-tun.service
-        - openvpn-server@server-tap.service
-
-    - name: Create RAS profile on VPN server
-      ansible.builtin.copy:
-        dest: /tmp/ras-client.ovpn
-        owner: root
-        group: root
-        mode: "0600"
-        content: |
-          client
-          dev tun
-          proto udp
-          remote 127.0.0.1 1194
-          nobind
-          persist-key
-          persist-tun
-          remote-cert-tls server
-          data-ciphers AES-256-GCM
-          data-ciphers-fallback AES-256-GCM
-          verb 3
-          <ca>
-          {{ pki_ca.content | b64decode | trim }}
-          </ca>
-          <cert>
-          {{ pki_ras_client_crt.content | b64decode | trim }}
-          </cert>
-          <key>
-          {{ pki_ras_client_key.content | b64decode | trim }}
-          </key>
-
-    - name: Create temporary profile directory on control host
-      ansible.builtin.file:
-        path: /private/tmp/otus23
-        state: directory
-        mode: "0700"
-      delegate_to: localhost
-      become: false
-      run_once: true
-
-    - name: Fetch RAS profile to control host
-      ansible.builtin.fetch:
-        src: /tmp/ras-client.ovpn
-        dest: /private/tmp/otus23/ras-client.ovpn
-        flat: true
-
-- name: Configure VPN client
-  hosts: vpn_client
-  become: true
-  tasks:
-    - name: Create OpenVPN key directory
-      ansible.builtin.file:
-        path: /etc/openvpn/pki
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
-
-    - name: Install VPN client certificate files
-      ansible.builtin.copy:
-        dest: "{{ item.dest }}"
-        owner: root
-        group: root
-        mode: "{{ item.mode }}"
-        content: "{{ item.content }}"
-      loop:
-        - dest: /etc/openvpn/pki/ca.crt
-          mode: "0644"
-          content: "{{ hostvars['vpn-server'].pki_ca.content | b64decode }}"
-        - dest: /etc/openvpn/pki/client.crt
-          mode: "0644"
-          content: "{{ hostvars['vpn-server'].pki_vpn_client_crt.content | b64decode }}"
-        - dest: /etc/openvpn/pki/client.key
-          mode: "0600"
-          content: "{{ hostvars['vpn-server'].pki_vpn_client_key.content | b64decode }}"
-
-    - name: Create TUN client configuration
-      ansible.builtin.copy:
-        dest: /etc/openvpn/client/vpn-tun.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          client
-          dev tun0
-          proto udp
-          remote 192.168.56.10 1194
-          nobind
-          persist-key
-          persist-tun
-          remote-cert-tls server
-          ca /etc/openvpn/pki/ca.crt
-          cert /etc/openvpn/pki/client.crt
-          key /etc/openvpn/pki/client.key
-          data-ciphers AES-256-GCM
-          data-ciphers-fallback AES-256-GCM
-          verb 3
-
-    - name: Create TAP client configuration
-      ansible.builtin.copy:
-        dest: /etc/openvpn/client/vpn-tap.conf
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          client
-          dev tap0
-          proto udp
-          remote 192.168.56.10 1195
-          nobind
-          persist-key
-          persist-tun
-          remote-cert-tls server
-          ca /etc/openvpn/pki/ca.crt
-          cert /etc/openvpn/pki/client.crt
-          key /etc/openvpn/pki/client.key
-          data-ciphers AES-256-GCM
-          data-ciphers-fallback AES-256-GCM
-          verb 3
-
-    - name: Start OpenVPN client services
-      ansible.builtin.systemd:
-        name: "{{ item }}"
-        enabled: true
-        state: restarted
-      loop:
-        - openvpn-client@vpn-tun.service
-        - openvpn-client@vpn-tap.service
-
-    - name: Check TUN connection
-      ansible.builtin.command: ping -c 2 -W 2 10.8.0.1
-      register: tun_ping
-      changed_when: false
-      retries: 15
-      delay: 2
-      until: tun_ping.rc == 0
-
-    - name: Check TAP connection
-      ansible.builtin.command: ping -c 2 -W 2 10.9.0.1
-      register: tap_ping
-      changed_when: false
-      retries: 15
-      delay: 2
-      until: tap_ping.rc == 0
