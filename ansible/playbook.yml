@@ -1,175 +1,295 @@
 ---
-- name: Install DNS packages
+- name: Install network tools
   hosts: all
   become: true
   tasks:
-    - name: Install required packages
+    - name: Install ping
       ansible.builtin.apt:
-        name:
-          - bind9
-          - bind9utils
-          - dnsutils
+        name: iputils-ping
         state: present
         update_cache: true
 
-- name: Configure DNS servers
-  hosts: dns_servers
+- name: Configure VLAN 10
+  hosts: vlan10
   become: true
   vars:
-    dns_server_ips:
-      ns01: 192.168.50.10
-      ns02: 192.168.50.11
+    vlan_addresses:
+      testClient1: 10.10.10.254/24
+      testServer1: 10.10.10.1/24
   tasks:
-    - name: Write main BIND configuration
+    - name: Configure VLAN 10 interface
       ansible.builtin.copy:
-        dest: /etc/bind/named.conf
+        dest: /etc/netplan/99-otus-vlan10.yaml
         owner: root
-        group: bind
-        mode: "0644"
+        group: root
+        mode: "0600"
         content: |
-          include "/etc/bind/named.conf.options";
-          include "/etc/bind/named.conf.local";
+          network:
+            version: 2
+            ethernets:
+              eth1:
+                dhcp4: false
+                optional: true
+            vlans:
+              vlan10:
+                id: 10
+                link: eth1
+                addresses:
+                  - {{ vlan_addresses[inventory_hostname] }}
 
-    - name: Write BIND options
-      ansible.builtin.copy:
-        dest: /etc/bind/named.conf.options
-        owner: root
-        group: bind
-        mode: "0644"
-        content: |
-          options {
-              directory "/var/cache/bind";
-              listen-on { 127.0.0.1; {{ dns_server_ips[inventory_hostname] }}; };
-              listen-on-v6 { none; };
-              recursion no;
-              allow-query { any; };
-              dnssec-validation no;
-          };
-
-    - name: Write split DNS configuration
-      ansible.builtin.copy:
-        dest: /etc/bind/named.conf.local
-        owner: root
-        group: bind
-        mode: "0644"
-        content: |
-          acl client1 { 192.168.50.15; };
-          acl client2 { 192.168.50.16; };
-
-          view "client1" {
-              match-clients { client1; };
-
-              zone "dns.lab" {
-                  type master;
-                  file "/etc/bind/db.dns.lab.client1";
-              };
-
-              zone "newdns.lab" {
-                  type master;
-                  file "/etc/bind/db.newdns.lab";
-              };
-          };
-
-          view "client2" {
-              match-clients { client2; };
-
-              zone "dns.lab" {
-                  type master;
-                  file "/etc/bind/db.dns.lab.client2";
-              };
-          };
-
-    - name: Write DNS zones
-      ansible.builtin.copy:
-        dest: "/etc/bind/{{ item.name }}"
-        owner: root
-        group: bind
-        mode: "0644"
-        content: "{{ item.content }}"
-      loop:
-        - name: db.dns.lab.client1
-          content: |
-            $TTL 3600
-            $ORIGIN dns.lab.
-            @ IN SOA ns01.dns.lab. root.dns.lab. (
-                2026071901 3600 600 86400 3600
-            )
-            @ IN NS ns01.dns.lab.
-            ns01 IN A 192.168.50.10
-            web1 IN A 192.168.50.15
-
-        - name: db.dns.lab.client2
-          content: |
-            $TTL 3600
-            $ORIGIN dns.lab.
-            @ IN SOA ns01.dns.lab. root.dns.lab. (
-                2026071901 3600 600 86400 3600
-            )
-            @ IN NS ns01.dns.lab.
-            ns01 IN A 192.168.50.10
-            web2 IN A 192.168.50.16
-
-        - name: db.newdns.lab
-          content: |
-            $TTL 3600
-            $ORIGIN newdns.lab.
-            @ IN SOA ns01.newdns.lab. root.newdns.lab. (
-                2026071901 3600 600 86400 3600
-            )
-            @ IN NS ns01.newdns.lab.
-            ns01 IN A 192.168.50.10
-            www IN A 192.168.50.15
-            www IN A 192.168.50.16
-
-    - name: Check BIND configuration
-      ansible.builtin.command: named-checkconf
+    - name: Apply VLAN 10 configuration
+      ansible.builtin.command: netplan apply
       changed_when: false
 
-    - name: Check DNS zones
-      ansible.builtin.command:
-        argv:
-          - named-checkzone
-          - "{{ item.zone }}"
-          - "/etc/bind/{{ item.file }}"
-      loop:
-        - zone: dns.lab
-          file: db.dns.lab.client1
-        - zone: dns.lab
-          file: db.dns.lab.client2
-        - zone: newdns.lab
-          file: db.newdns.lab
+- name: Configure VLAN 20
+  hosts: vlan20
+  become: true
+  vars:
+    vlan_addresses:
+      testClient2: 10.10.10.254/24
+      testServer2: 10.10.10.1/24
+  tasks:
+    - name: Configure VLAN 20 interface
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-otus-vlan20.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth1:
+                dhcp4: false
+                optional: true
+            vlans:
+              vlan20:
+                id: 20
+                link: eth1
+                addresses:
+                  - {{ vlan_addresses[inventory_hostname] }}
+
+    - name: Apply VLAN 20 configuration
+      ansible.builtin.command: netplan apply
       changed_when: false
 
-    - name: Enable and restart BIND
-      ansible.builtin.service:
-        name: bind9
-        state: restarted
-        enabled: true
-
-- name: Configure DNS clients
-  hosts: clients
+- name: Configure LACP switch
+  hosts: lacp_switch
   become: true
   tasks:
-    - name: Create systemd-resolved configuration directory
-      ansible.builtin.file:
-        path: /etc/systemd/resolved.conf.d
-        state: directory
+    - name: Install Open vSwitch
+      ansible.builtin.apt:
+        name: openvswitch-switch
+        state: present
+
+    - name: Configure switch interfaces without addresses
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-otus-lacp-switch.yaml
         owner: root
         group: root
-        mode: "0755"
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth1:
+                dhcp4: false
+                optional: true
+              eth2:
+                dhcp4: false
+                optional: true
+              eth3:
+                dhcp4: false
+                optional: true
+              eth4:
+                dhcp4: false
+                optional: true
 
-    - name: Set DNS servers on clients
+    - name: Apply switch network configuration
+      ansible.builtin.command: netplan apply
+      changed_when: false
+
+    - name: Start Open vSwitch
+      ansible.builtin.service:
+        name: openvswitch-switch
+        enabled: true
+        state: started
+
+    - name: Create Open vSwitch bridge
+      ansible.builtin.command:
+        argv:
+          - ovs-vsctl
+          - --may-exist
+          - add-br
+          - br-lacp
+      changed_when: false
+
+    - name: Create LACP port for centralRouter
+      ansible.builtin.command:
+        argv:
+          - ovs-vsctl
+          - --may-exist
+          - add-bond
+          - br-lacp
+          - central-bond
+          - eth1
+          - eth2
+          - lacp=active
+          - bond_mode=balance-tcp
+      changed_when: false
+
+    - name: Create LACP port for inetRouter
+      ansible.builtin.command:
+        argv:
+          - ovs-vsctl
+          - --may-exist
+          - add-bond
+          - br-lacp
+          - inet-bond
+          - eth3
+          - eth4
+          - lacp=active
+          - bond_mode=balance-tcp
+      changed_when: false
+
+    - name: Set fast LACP timer on switch ports
+      ansible.builtin.command:
+        argv:
+          - ovs-vsctl
+          - set
+          - port
+          - "{{ item }}"
+          - other_config:lacp-time=fast
+      loop:
+        - central-bond
+        - inet-bond
+      changed_when: false
+
+- name: Configure LACP bond
+  hosts: bond_routers
+  become: true
+  vars:
+    bond_addresses:
+      inetRouter: 172.16.25.1/30
+      centralRouter: 172.16.25.2/30
+  tasks:
+    - name: Load bonding module
+      ansible.builtin.command: modprobe bonding
+      changed_when: false
+
+    - name: Load bonding module at boot
       ansible.builtin.copy:
-        dest: /etc/systemd/resolved.conf.d/dns.conf
+        dest: /etc/modules-load.d/bonding.conf
         owner: root
         group: root
         mode: "0644"
         content: |
-          [Resolve]
-          DNS=192.168.50.10 192.168.50.11
-          Domains=dns.lab newdns.lab
+          bonding
 
-    - name: Restart systemd-resolved
-      ansible.builtin.service:
-        name: systemd-resolved
-        state: restarted
+    - name: Configure LACP bond
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-otus-bond.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth1:
+                dhcp4: false
+                optional: true
+              eth2:
+                dhcp4: false
+                optional: true
+            bonds:
+              bond0:
+                interfaces:
+                  - eth1
+                  - eth2
+                addresses:
+                  - {{ bond_addresses[inventory_hostname] }}
+                parameters:
+                  mode: 802.3ad
+                  mii-monitor-interval: 100
+                  lacp-rate: fast
+                  transmit-hash-policy: layer3+4
+
+    - name: Apply LACP configuration
+      ansible.builtin.command: netplan apply
+      changed_when: false
+
+    - name: Enable promiscuous mode for LACP links
+      ansible.builtin.command: ip link set dev {{ item }} promisc on
+      loop:
+        - eth1
+        - eth2
+      changed_when: false
+
+    - name: Read bond status
+      ansible.builtin.command: cat /proc/net/bonding/bond0
+      register: bond_status
+      changed_when: false
+      retries: 20
+      delay: 2
+      until:
+        - "'Partner Mac Address:' in bond_status.stdout"
+        - "'Partner Mac Address: 00:00:00:00:00:00' not in bond_status.stdout"
+
+    - name: Check LACP mode and slave links
+      ansible.builtin.assert:
+        that:
+          - "'IEEE 802.3ad Dynamic link aggregation' in bond_status.stdout"
+          - "'Slave Interface: eth1' in bond_status.stdout"
+          - "'Slave Interface: eth2' in bond_status.stdout"
+          - "'Partner Mac Address: 00:00:00:00:00:00' not in bond_status.stdout"
+
+    - name: Check connection through LACP bond
+      ansible.builtin.command: >-
+        ping -I bond0 -c 2 -W 2
+        {{ '172.16.25.2' if inventory_hostname == 'inetRouter' else '172.16.25.1' }}
+      changed_when: false
+      register: bond_ping
+      retries: 10
+      delay: 2
+      until: bond_ping.rc == 0
+
+- name: Check VLAN 10
+  hosts: testClient1
+  become: true
+  tasks:
+    - name: Ping server in VLAN 10
+      ansible.builtin.command: ping -c 2 -W 2 10.10.10.1
+      changed_when: false
+
+- name: Check VLAN 20
+  hosts: testClient2
+  become: true
+  tasks:
+    - name: Ping server in VLAN 20
+      ansible.builtin.command: ping -c 2 -W 2 10.10.10.1
+      changed_when: false
+
+- name: Check LACP failover
+  hosts: centralRouter
+  become: true
+  tasks:
+    - name: Ping inetRouter through bond before link loss
+      ansible.builtin.command: ping -I bond0 -c 2 -W 2 172.16.25.1
+      changed_when: false
+
+    - name: Check bond after disabling first link
+      block:
+        - name: Disable first bond link
+          ansible.builtin.command: ip link set eth1 down
+
+        - name: Ping inetRouter through remaining link
+          ansible.builtin.command: ping -I bond0 -c 2 -W 2 172.16.25.1
+          changed_when: false
+          register: failover_ping
+          retries: 10
+          delay: 2
+          until: failover_ping.rc == 0
+      always:
+        - name: Enable first bond link
+          ansible.builtin.command: ip link set eth1 up

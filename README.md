@@ -1,54 +1,83 @@
-## Задание 24. DNS
+## Задание 25. VLAN и LACP
+
+### Текст задания
+
+В тестовой сети Office1 нужно добавить четыре узла с дополнительными интерфейсами и одинаковыми адресами в разных VLAN:
+
+- `testClient1` и `testClient2` с адресом `10.10.10.254`;
+- `testServer1` и `testServer2` с адресом `10.10.10.1`;
+- `testClient1` должен работать только с `testServer1`, а `testClient2` только с `testServer2`.
+
+Между `centralRouter` и `inetRouter` нужно создать два линка и объединить их в LACP bond. Работа bond проверяется при отключении одного интерфейса.
 
 ### Файлы
 
-`Vagrantfile` поднимает два DNS-сервера и два клиента в сети `192.168.50.0/24`.
+`Vagrantfile` поднимает семь ВМ. Четыре VLAN-узла подключены к общей внутренней сети `testLAN`. Для LACP созданы две пары отдельных внутренних сетей и ВМ `lacpSwitch`.
 
-`ansible/playbook.yml` устанавливает BIND, создает зоны и настраивает DNS на клиентах.
+`ansible/playbook.yml` настраивает VLAN 10, VLAN 20 и LACP bond в режиме `802.3ad`, затем проверяет связь и отказ одного линка.
 
-### Схема
+### Схема сети
 
-| Узел | Адрес | Назначение |
-| --- | --- | --- |
-| `ns01` | `192.168.50.10` | DNS-сервер |
-| `ns02` | `192.168.50.11` | DNS-сервер с той же конфигурацией |
-| `client1` | `192.168.50.15` | Клиент для `web1` |
-| `client2` | `192.168.50.16` | Клиент для `web2` |
+~~~text
+testClient1  10.10.10.254/24  eth1.10 --- testLAN, VLAN 10 --- eth1.10  10.10.10.1/24  testServer1
 
-На DNS-серверах настроены два представления BIND. Оба сервера отвечают одинаково, поэтому `ns02` остается вторым DNS-сервером для клиентов.
+testClient2  10.10.10.254/24  eth1.20 --- testLAN, VLAN 20 --- eth1.20  10.10.10.1/24  testServer2
 
-Для `client1` зона `dns.lab` содержит только `web1.dns.lab` с адресом `192.168.50.15`. Ему также доступна зона `newdns.lab`, где `www.newdns.lab` возвращает адреса обоих клиентов.
+centralRouter  eth1 --- central-link1 --- eth1  lacpSwitch  eth3 --- inet-link1 --- eth1  inetRouter
+               eth2 --- central-link2 --- eth2              eth4 --- inet-link2 --- eth2
+                 \____________________________ bond0 ____________________________/
+                 172.16.25.2/30                         172.16.25.1/30
+~~~
 
-Для `client2` зона `dns.lab` содержит только `web2.dns.lab` с адресом `192.168.50.16`. Зона `newdns.lab` для него не настроена.
+### Реализация
 
-### Запуск
+На `testClient1` и `testServer1` создан интерфейс `vlan10`. На `testClient2` и `testServer2` создан `vlan20`. Родительский интерфейс `eth1` адреса не получает.
 
-```bash
+На маршрутизаторах `eth1` и `eth2` объединены в `bond0` с режимом `802.3ad`, быстрыми LACP-пакетами и проверкой линка каждые 100 мс. На `lacpSwitch` Open vSwitch принимает LACP от обоих bond и передает трафик между ними. У коммутатора нет IP-адреса.
+
+Для передачи LACP-кадров через VirtualBox на линках bond разрешен promisc-режим: для адаптеров ВМ в `Vagrantfile` и для гостевых интерфейсов после применения netplan.
+
+### Команды и вывод
+
+Запуск стенда:
+
+~~~bash
 vagrant up
-```
+~~~
 
-### Результат проверки
+Проверка VLAN 10:
 
-После `vagrant up` проверка выполнялась запросами `dig` с обоих клиентов.
+~~~bash
+vagrant ssh testClient1 -c 'ping -c 2 10.10.10.1'
+~~~
 
-`client1`:
+Проверка VLAN 20:
 
-```bash
-dig +short web1.dns.lab
-dig +short www.newdns.lab
-dig web2.dns.lab +noall +comments
-```
+~~~bash
+vagrant ssh testClient2 -c 'ping -c 2 10.10.10.1'
+~~~
 
-Получен адрес `192.168.50.15` для `web1.dns.lab`. Запрос `www.newdns.lab` вернул `192.168.50.15` и `192.168.50.16`. Для `web2.dns.lab` получен статус `NXDOMAIN`.
+Проверка bond и отключения первого линка:
 
-`client2`:
+~~~bash
+vagrant ssh centralRouter -c 'cat /proc/net/bonding/bond0'
+vagrant ssh centralRouter -c 'sudo ip link set eth1 down'
+vagrant ssh centralRouter -c 'ping -I bond0 -c 2 172.16.25.1'
+~~~
 
-```bash
-dig +short web2.dns.lab
-dig web1.dns.lab +noall +comments
-dig www.newdns.lab +noall +comments
-```
+После запуска стенда получены результаты:
 
-Получен адрес `192.168.50.16` для `web2.dns.lab`. Для `web1.dns.lab` получен статус `NXDOMAIN`, а запрос `www.newdns.lab` вернул `REFUSED`.
+~~~text
+testClient1 -> 10.10.10.1: 2 packets transmitted, 2 received, 0% packet loss
+testClient2 -> 10.10.10.1: 2 packets transmitted, 2 received, 0% packet loss
+centralRouter -> 172.16.25.1 через bond0: 2 packets transmitted, 2 received, 0% packet loss
+после отключения eth1: 2 packets transmitted, 2 received, 0% packet loss
+~~~
 
-Такие же ответы получены при запросах к `ns02` по адресу `192.168.50.11`.
+В выводе `cat /proc/net/bonding/bond0` подтверждены режим `IEEE 802.3ad Dynamic link aggregation`, быстрый LACP и оба интерфейса `eth1` и `eth2` в составе bond.
+
+### Заметки
+
+- У адресов `10.10.10.1` и `10.10.10.254` есть по две копии, но VLAN разделяют широковещательные домены, поэтому конфликта адресов нет.
+- LACP сохраняет связь при отключении одного линка. Один TCP-поток не обязан использовать суммарную скорость обоих линков: выбор линии зависит от хеша потока.
+- LACP требует партнера, который участвует в обмене служебными кадрами. В VirtualBox эту роль выполняет `lacpSwitch` с Open vSwitch.
