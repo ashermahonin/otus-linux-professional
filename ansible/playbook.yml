@@ -1,163 +1,260 @@
 ---
-- name: Configure FreeIPA server
-  hosts: ipa_server
+- name: Deploy dynamic web applications
+  hosts: dynamic_web
   become: true
-  vars:
-    ipa_server_name: ipa.otus.test
-    ipa_server_ip: 192.168.56.10
-    ipa_client_name: client.otus.test
-    ipa_client_ip: 192.168.56.20
-    ipa_domain: otus.test
-    ipa_realm: OTUS.TEST
-    ipa_dm_password: DirectoryManager123
-    ipa_admin_password: Admin12345
   tasks:
-    - name: Set FreeIPA server hostname
-      ansible.builtin.command: hostnamectl set-hostname {{ ipa_server_name }}
-      changed_when: false
-
-    - name: Set local host records
-      ansible.builtin.copy:
-        dest: /etc/hosts
-        owner: root
-        group: root
-        mode: "0644"
-        content: |
-          127.0.0.1 localhost localhost.localdomain
-          {{ ipa_server_ip }} {{ ipa_server_name }} ipa
-          {{ ipa_client_ip }} {{ ipa_client_name }} client
-
-    - name: Install FreeIPA server packages
-      ansible.builtin.dnf:
+    - name: Install Docker repository dependencies
+      ansible.builtin.apt:
         name:
-          - ipa-server
-          - ipa-server-dns
+          - ca-certificates
+          - curl
+          - python3-debian
+        state: present
+        update_cache: true
+
+    - name: Create Docker keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker repository key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Add Docker repository
+      ansible.builtin.deb822_repository:
+        name: docker
+        types: deb
+        uris: https://download.docker.com/linux/ubuntu
+        suites: "{{ ansible_facts['distribution_release'] }}"
+        components: stable
+        signed_by: /etc/apt/keyrings/docker.asc
         state: present
 
-    - name: Start firewall service
+    - name: Install Docker and Docker Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Start Docker service
       ansible.builtin.service:
-        name: firewalld
+        name: docker
         enabled: true
         state: started
 
-    - name: Install FreeIPA server
-      ansible.builtin.command:
-        argv:
-          - ipa-server-install
-          - --unattended
-          - --hostname={{ ipa_server_name }}
-          - --domain={{ ipa_domain }}
-          - --realm={{ ipa_realm }}
-          - --ds-password={{ ipa_dm_password }}
-          - --admin-password={{ ipa_admin_password }}
-          - --setup-dns
-          - --no-forwarders
-          - --no-ntp
-      args:
-        creates: /etc/ipa/default.conf
-      no_log: true
-
-    - name: Allow FreeIPA services in firewall
-      ansible.builtin.command: firewall-cmd --permanent --add-service={{ item }}
+    - name: Create application directories
+      ansible.builtin.file:
+        path: /opt/dynamic-web/{{ item }}
+        state: directory
+        mode: "0755"
       loop:
-        - freeipa-ldap
-        - dns
-      register: firewall_rule
-      changed_when: "'success' in firewall_rule.stdout"
+        - nginx
+        - php
+        - flask
+        - react
 
-    - name: Reload firewall rules
-      ansible.builtin.command: firewall-cmd --reload
-      changed_when: false
-
-    - name: Get Kerberos ticket for FreeIPA admin
-      ansible.builtin.shell: >-
-        printf '%s\n' '{{ ipa_admin_password }}' |
-        kinit admin
-      changed_when: false
-      no_log: true
-
-    - name: Add test user to FreeIPA
-      ansible.builtin.command:
-        argv:
-          - ipa
-          - user-add
-          - otususer
-          - --first=Otus
-          - --last=User
-          - --email=otususer@{{ ipa_domain }}
-      register: ipa_user
-      changed_when: ipa_user.rc == 0
-      failed_when: ipa_user.rc != 0 and "already exists" not in ipa_user.stderr
-
-- name: Configure FreeIPA client
-  hosts: ipa_clients
-  become: true
-  vars:
-    ipa_server_name: ipa.otus.test
-    ipa_server_ip: 192.168.56.10
-    ipa_client_name: client.otus.test
-    ipa_client_ip: 192.168.56.20
-    ipa_domain: otus.test
-    ipa_realm: OTUS.TEST
-    ipa_admin_password: Admin12345
-  tasks:
-    - name: Set FreeIPA client hostname
-      ansible.builtin.command: hostnamectl set-hostname {{ ipa_client_name }}
-      changed_when: false
-
-    - name: Set local host records
+    - name: Write Docker Compose configuration
       ansible.builtin.copy:
-        dest: /etc/hosts
-        owner: root
-        group: root
+        dest: /opt/dynamic-web/compose.yaml
         mode: "0644"
         content: |
-          127.0.0.1 localhost localhost.localdomain
-          {{ ipa_server_ip }} {{ ipa_server_name }} ipa
-          {{ ipa_client_ip }} {{ ipa_client_name }} client
+          services:
+            nginx:
+              image: nginx:1.27-alpine
+              ports:
+                - "8081:8081"
+                - "8082:8082"
+                - "8083:8083"
+              volumes:
+                - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+                - ./php:/var/www/php:ro
+              depends_on:
+                - php
+                - flask
+                - react
 
-    - name: Install FreeIPA client package
-      ansible.builtin.dnf:
-        name: ipa-client
-        state: present
+            php:
+              image: php:8.3-fpm-alpine
+              volumes:
+                - ./php:/var/www/php:ro
 
-    - name: Set FreeIPA DNS server for client
+            flask:
+              image: python:3.12-alpine
+              working_dir: /app
+              command: sh -c "pip install --no-cache-dir Flask && python app.py"
+              volumes:
+                - ./flask:/app:ro
+
+            react:
+              image: node:20-alpine
+              working_dir: /app
+              command: sh -c "npm install --omit=dev && node app.js"
+              volumes:
+                - ./react:/app
+
+    - name: Write Nginx configuration
       ansible.builtin.copy:
-        dest: /etc/NetworkManager/conf.d/90-ipa-dns.conf
-        owner: root
-        group: root
+        dest: /opt/dynamic-web/nginx/default.conf
         mode: "0644"
         content: |
-          [main]
-          dns=none
+          server {
+              listen 8081;
+              server_name _;
+              root /var/www/php;
+              index index.php;
 
-    - name: Write client resolver configuration
+              location / {
+                  try_files $uri $uri/ /index.php?$query_string;
+              }
+
+              location ~ \.php$ {
+                  include fastcgi_params;
+                  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+                  fastcgi_pass php:9000;
+              }
+          }
+
+          server {
+              listen 8082;
+              server_name _;
+
+              location / {
+                  proxy_pass http://flask:5000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+          }
+
+          server {
+              listen 8083;
+              server_name _;
+
+              location / {
+                  proxy_pass http://react:3000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+          }
+
+    - name: Write PHP application
       ansible.builtin.copy:
-        dest: /etc/resolv.conf
-        owner: root
-        group: root
+        dest: /opt/dynamic-web/php/index.php
         mode: "0644"
         content: |
-          search {{ ipa_domain }}
-          nameserver {{ ipa_server_ip }}
+          <!doctype html>
+          <html lang="ru">
+          <head><meta charset="utf-8"><title>PHP-FPM</title></head>
+          <body>
+            <h1>PHP-FPM</h1>
+            <p>Время ответа: <?= htmlspecialchars(date('c')) ?></p>
+          </body>
+          </html>
 
-    - name: Join FreeIPA domain
-      ansible.builtin.command:
-        argv:
-          - ipa-client-install
-          - --unattended
-          - --domain={{ ipa_domain }}
-          - --realm={{ ipa_realm }}
-          - --server={{ ipa_server_name }}
-          - --principal=admin
-          - --password={{ ipa_admin_password }}
-          - --mkhomedir
-          - --no-ntp
-          - --force-join
+    - name: Write Flask application
+      ansible.builtin.copy:
+        dest: /opt/dynamic-web/flask/app.py
+        mode: "0644"
+        content: |
+          from datetime import datetime, timezone
+          from flask import Flask
+
+          app = Flask(__name__)
+
+          @app.get("/")
+          def index():
+              return (
+                  "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+                  "<title>Flask</title></head><body><h1>Flask</h1>"
+                  f"<p>Время ответа: {datetime.now(timezone.utc).isoformat()}</p>"
+                  "</body></html>"
+              )
+
+          app.run(host="0.0.0.0", port=5000)
+
+    - name: Write React package manifest
+      ansible.builtin.copy:
+        dest: /opt/dynamic-web/react/package.json
+        mode: "0644"
+        content: |
+          {
+            "dependencies": {
+              "express": "4.21.2",
+              "react": "19.0.0",
+              "react-dom": "19.0.0"
+            }
+          }
+
+    - name: Write React application
+      ansible.builtin.copy:
+        dest: /opt/dynamic-web/react/app.js
+        mode: "0644"
+        content: |
+          const express = require("express");
+          const React = require("react");
+          const { renderToStaticMarkup } = require("react-dom/server");
+
+          const app = express();
+
+          app.get("/", (_, response) => {
+            const page = React.createElement(
+              "main",
+              null,
+              React.createElement("h1", null, "React"),
+              React.createElement(
+                "p",
+                null,
+                "Время ответа: " + new Date().toISOString()
+              )
+            );
+
+            response.type("html").send(
+              "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+              + "<title>React</title></head><body>"
+              + renderToStaticMarkup(page)
+              + "</body></html>"
+            );
+          });
+
+          app.listen(3000, "0.0.0.0");
+
+    - name: Start applications
+      ansible.builtin.command: docker compose up -d
       args:
-        creates: /etc/ipa/default.conf
-      no_log: true
-
-    - name: Check FreeIPA user on client
-      ansible.builtin.command: getent passwd otususer
+        chdir: /opt/dynamic-web
       changed_when: false
+
+    - name: Check PHP site through Nginx
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8081
+        return_content: true
+      register: php_site
+      retries: 20
+      delay: 2
+      until: php_site.status == 200 and "PHP-FPM" in php_site.content
+
+    - name: Check Flask site through Nginx
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8082
+        return_content: true
+      register: flask_site
+      retries: 20
+      delay: 2
+      until: flask_site.status == 200 and "Flask" in flask_site.content
+
+    - name: Check React site through Nginx
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8083
+        return_content: true
+      register: react_site
+      retries: 20
+      delay: 2
+      until: react_site.status == 200 and "React" in react_site.content
