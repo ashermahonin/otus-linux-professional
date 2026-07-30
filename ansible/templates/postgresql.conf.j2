@@ -1,0 +1,16 @@
+# PostgreSQL settings for the OTUS replication stand
+listen_addresses = 'localhost,{{ postgres_primary_ip if inventory_hostname in groups["postgres_primary"] else postgres_standby_ip }}'
+port = 5432
+wal_level = replica
+max_wal_senders = 10
+max_replication_slots = 5
+wal_keep_size = 256MB
+hot_standby = on
+password_encryption = scram-sha-256
+logging_collector = on
+log_directory = 'log'
+log_filename = 'postgresql-%a.log'
+
+{% if inventory_hostname in groups["postgres_standby"] %}
+include_if_exists = '{{ postgres_config_dir }}/recovery.conf'
+{% endif %}

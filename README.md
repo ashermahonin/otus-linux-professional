@@ -1,24 +1,28 @@
-## Задание 27. Dynamic Web
+## Задание 28. PostgreSQL
+
+### Репозиторий
+
+https://github.com/ashermahonin/otus-linux-professional/tree/28-postgres
 
 ### Текст задания
 
-Нужно поднять стенд с Nginx и динамическими приложениями. Для каждого сайта должен быть отдельный порт на localhost, а развертывание выполняется через Vagrant и Ansible.
+Нужно настроить hot_standby репликацию PostgreSQL с использованием слотов и резервное копирование.
 
 ### Файлы
 
-Vagrantfile создаёт одну виртуальную машину и пробрасывает на localhost порты 8081, 8082 и 8083.
+`Vagrantfile` поднимает три виртуальные машины: `postgresPrimary`, `postgresStandby` и `barman`.
 
-ansible/playbook.yml устанавливает Docker и плагин Docker Compose, создаёт конфигурацию сервисов и запускает их через Docker Compose.
+`ansible/playbook.yml` устанавливает PostgreSQL 16 и Barman, настраивает репликацию, создаёт резервную копию и выполняет проверки.
+
+В `ansible/templates` находятся конфигурации PostgreSQL, доступа к базе, реплики и Barman.
 
 ### Реализация
 
-В контейнере Nginx настроено три виртуальных сервера:
+На `postgresPrimary` работает основная база. Для `postgresStandby` создан физический слот `standby_slot`. Реплика клонируется через `pg_basebackup` и получает изменения от основной базы в режиме hot standby.
 
-- 8081 передаёт PHP-запросы в php-fpm;
-- 8082 проксирует запросы в Flask;
-- 8083 проксирует запросы в React-приложение на Node.js.
+На `barman` установлен Barman. Он делает потоковую резервную копию основной базы, получает WAL через слот `barman_slot`, сжимает копии gzip и хранит их по политике `RECOVERY WINDOW OF 7 DAYS`. Обслуживание Barman запускается каждые пять минут, резервная копия создаётся каждый день в 02:00.
 
-Внешние порты есть только у Nginx. Контейнеры приложений доступны ему по внутренней сети Docker. Каждая страница показывает время ответа, поэтому результат формируется приложением при запросе.
+В PostgreSQL 16 режим реплики включается файлом `standby.signal`. Параметры подключения к основной базе находятся в `recovery.conf`, который подключается из `otus.conf`.
 
 ### Команды и вывод
 
@@ -28,23 +32,49 @@ ansible/playbook.yml устанавливает Docker и плагин Docker Co
 vagrant up
 ~~~
 
-Проверка сайтов с хостовой машины:
+Проверка состояния репликации:
 
 ~~~bash
-curl http://127.0.0.1:8081
-curl http://127.0.0.1:8082
-curl http://127.0.0.1:8083
+vagrant ssh postgresPrimary -c "sudo -u postgres psql -c \"SELECT slot_name, active FROM pg_replication_slots;\""
+vagrant ssh postgresStandby -c "sudo -u postgres psql -tAc 'SELECT pg_is_in_recovery();'"
 ~~~
 
-После запуска получены ответы:
+Полученный результат:
 
 ~~~text
-http://127.0.0.1:8081 -> PHP-FPM
-http://127.0.0.1:8082 -> Flask
-http://127.0.0.1:8083 -> React
+ standby_slot:true
+ t
+~~~
+
+Проверка данных на реплике:
+
+~~~bash
+vagrant ssh postgresStandby -c "sudo -u postgres psql -d otus -c 'SELECT * FROM replication_check;'"
+~~~
+
+~~~text
+replication is working
+~~~
+
+Проверка резервной копии:
+
+~~~bash
+vagrant ssh barman -c "sudo -u barman barman check primary"
+vagrant ssh barman -c "sudo -u barman barman list-backup primary"
+~~~
+
+После запуска получены результаты:
+
+~~~text
+ PostgreSQL: OK
+ PostgreSQL streaming: OK
+ replication slot: OK
+ receive-wal running: OK
+ minimum redundancy requirements: OK (have 2 backups, expected at least 1)
+ primary 20260730T133947 - Thu Jul 30 13:39:47 2026 - Size: 22.3 MiB
 ~~~
 
 ### Заметки
 
-- В примере используются образы PHP, Python, Node.js и Nginx из Docker Hub.
-- Время ответа меняется при каждом запросе, поэтому точное значение в выводе не фиксируется.
+- Пароли в плейбуке учебные и используются только внутри изолированной сети стенда.
+- Созданная при развертывании резервная копия нужна для проверки Barman. Следующие копии запускаются по расписанию.

@@ -1,27 +1,55 @@
 # -*- mode: ruby -*-
 
+MACHINES = {
+  postgresPrimary: {
+    hostname: "postgres-primary",
+    ip: "192.168.56.101",
+    memory: 1024,
+    cpus: 1
+  },
+  postgresStandby: {
+    hostname: "postgres-standby",
+    ip: "192.168.56.102",
+    memory: 1024,
+    cpus: 1
+  },
+  barman: {
+    hostname: "barman",
+    ip: "192.168.56.103",
+    memory: 1024,
+    cpus: 1
+  }
+}.freeze
+
 Vagrant.configure("2") do |config|
-  config.vm.box = "bento/ubuntu-24.04"
-  config.vm.box_version = "202510.26.0"
+  config.vm.box = "local/ubuntu-22.04"
 
-  config.vm.define "dynamicWeb" do |server|
-    server.vm.hostname = "dynamic-web"
-    server.vm.network "forwarded_port", guest: 8081, host: 8081
-    server.vm.network "forwarded_port", guest: 8082, host: 8082
-    server.vm.network "forwarded_port", guest: 8083, host: 8083
+  MACHINES.each do |name, machine|
+    config.vm.define name do |server|
+      server.vm.hostname = machine[:hostname]
+      server.vm.network "private_network",
+                        ip: machine[:ip],
+                        netmask: "255.255.255.0",
+                        virtualbox__intnet: "otus28-postgres"
 
-    server.vm.provider "virtualbox" do |virtualbox|
-      virtualbox.name = "otus-27-dynamicWeb"
-      virtualbox.memory = 3072
-      virtualbox.cpus = 2
-    end
+      server.vm.provider "virtualbox" do |virtualbox|
+        virtualbox.name = "otus-28-#{machine[:hostname]}"
+        virtualbox.memory = machine[:memory]
+        virtualbox.cpus = machine[:cpus]
+      end
 
-    server.vm.provision "ansible" do |ansible|
-      ansible.playbook = "ansible/playbook.yml"
-      ansible.limit = "all"
-      ansible.groups = {
-        "dynamic_web" => ["dynamicWeb"]
-      }
+      # Ansible запускается после старта всех трёх машин.
+      next unless name == :barman
+
+      server.vm.provision "ansible" do |ansible|
+        ansible.playbook = "ansible/playbook.yml"
+        ansible.limit = "all"
+        ansible.groups = {
+          "postgres_primary" => ["postgresPrimary"],
+          "postgres_standby" => ["postgresStandby"],
+          "barman_servers" => ["barman"]
+        }
+      end
     end
   end
 end

@@ -1,0 +1,9 @@
+[barman]
+barman_home = /var/lib/barman
+configuration_files_directory = /etc/barman.d
+barman_user = barman
+log_file = /var/log/barman/barman.log
+compression = gzip
+minimum_redundancy = 1
+retention_policy = RECOVERY WINDOW OF 7 DAYS
+last_backup_maximum_age = 7 DAYS

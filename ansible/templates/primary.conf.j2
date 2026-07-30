@@ -1,0 +1,12 @@
+[primary]
+description = "PostgreSQL primary backup"
+conninfo = host={{ postgres_primary_ip }} user=barman port=5432 dbname=postgres
+streaming_conninfo = host={{ postgres_primary_ip }} user=barman_stream port=5432 dbname=postgres
+backup_method = postgres
+streaming_archiver = on
+archiver = off
+create_slot = auto
+slot_name = barman_slot
+retention_policy_mode = auto
+retention_policy = RECOVERY WINDOW OF 7 DAYS
+wal_retention_policy = main

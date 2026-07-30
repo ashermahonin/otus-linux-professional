@@ -1,0 +1,3 @@
+# PostgreSQL 16 reads this file through include_if_exists in otus.conf.
+primary_conninfo = 'host={{ postgres_primary_ip }} port=5432 user=replicator passfile=/var/lib/postgresql/.pgpass application_name=postgres-standby'
+primary_slot_name = 'standby_slot'
