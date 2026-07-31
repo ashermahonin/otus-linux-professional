@@ -1,8 +1,8 @@
-## Задание 28. PostgreSQL
+## Задание 29. PostgreSQL
 
 ### Репозиторий
 
-https://github.com/ashermahonin/otus-linux-professional/tree/28-postgres
+https://github.com/ashermahonin/otus-linux-professional/tree/29-postgres
 
 ### Текст задания
 

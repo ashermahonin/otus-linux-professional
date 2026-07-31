@@ -22,7 +22,7 @@ MACHINES = {
 }.freeze
 
 Vagrant.configure("2") do |config|
-  config.vm.box = "local/ubuntu-22.04"
+  config.vm.box = "local/ubuntu-24.04"
 
   MACHINES.each do |name, machine|
     config.vm.define name do |server|
@@ -30,10 +30,10 @@ Vagrant.configure("2") do |config|
       server.vm.network "private_network",
                         ip: machine[:ip],
                         netmask: "255.255.255.0",
-                        virtualbox__intnet: "otus28-postgres"
+                        virtualbox__intnet: "otus29-postgres"
 
       server.vm.provider "virtualbox" do |virtualbox|
-        virtualbox.name = "otus-28-#{machine[:hostname]}"
+        virtualbox.name = "otus-29-#{machine[:hostname]}"
         virtualbox.memory = machine[:memory]
         virtualbox.cpus = machine[:cpus]
       end

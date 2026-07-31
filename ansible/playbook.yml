@@ -295,7 +295,7 @@
 
     - name: Switch WAL on primary
       become_user: barman
-      ansible.builtin.command: barman switch-wal primary
+      ansible.builtin.command: barman switch-wal --force --archive primary
       changed_when: false
 
     - name: Process received WAL
