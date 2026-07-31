@@ -1,80 +1,95 @@
-## Задание 29. PostgreSQL
+## Задание 28. Репликация MySQL
 
-### Репозиторий
+### Что сделано
 
-https://github.com/ashermahonin/otus-linux-professional/tree/29-postgres
+Поднят стенд из двух виртуальных машин:
 
-### Текст задания
+- `master` — `192.168.56.101`;
+- `slave` — `192.168.56.102`.
 
-Нужно настроить hot_standby репликацию PostgreSQL с использованием слотов и резервное копирование.
+На мастере создана база `bet` и загружен файл `bet.dmp`. Настроена GTID-репликация на слейв. На слейве разрешена репликация пяти таблиц из задания, а `events_on_demand` и `v_same_event` исключены фильтрами.
+
+### Запуск
+
+```bash
+vagrant up
+```
+
+На первом запуске Vagrant устанавливает MySQL, копирует конфигурацию, загружает базу на мастер, подготавливает слейв и запускает репликацию.
+
+### Конфигурация
+
+В конфигурации мастера включены:
+
+- `server-id = 1`;
+- бинарный журнал;
+- `gtid-mode = ON`;
+- `enforce-gtid-consistency = ON`.
+
+В конфигурации слейва используется другой идентификатор `server-id = 2`. Фильтры `replicate-ignore-table` исключают две таблицы, которые не должны реплицироваться.
+
+Подключение к мастеру выполняется пользователем `repl` с `SOURCE_AUTO_POSITION=1`, поэтому координаты бинарного журнала вручную не задаются.
+
+### Проверка
+
+Список таблиц на мастере:
+
+```text
+Tables_in_bet
+bookmaker
+competition
+events_on_demand
+market
+odds
+outcome
+v_same_event
+```
+
+Список таблиц на слейве:
+
+```text
+Tables_in_bet
+bookmaker
+competition
+market
+odds
+outcome
+```
+
+Состояние репликации:
+
+```text
+Replica_IO_Running: Yes
+Replica_SQL_Running: Yes
+Auto_Position: 1
+Replicate_Ignore_Table: bet.events_on_demand,bet.v_same_event
+```
+
+Для проверки передачи изменения на мастере выполнена запись:
+
+```sql
+INSERT INTO bet.bookmaker (id, bookmaker_name)
+VALUES (1, '1xbet');
+```
+
+После этого на слейве:
+
+```sql
+SELECT * FROM bet.bookmaker WHERE id = 1;
+```
+
+```text
+id  bookmaker_name
+1   1xbet
+```
+
+Запись из `bookmaker` появилась на слейве, значит GTID-репликация для этой таблицы работает.
 
 ### Файлы
 
-`Vagrantfile` поднимает три виртуальные машины: `postgresPrimary`, `postgresStandby` и `barman`.
+- `Vagrantfile` — описание двух ВМ и автоматическая настройка MySQL;
+- `configs/master.cnf` — конфигурация мастера;
+- `configs/slave.cnf` — конфигурация слейва и фильтры таблиц;
+- `bet.dmp` — исходный дамп базы.
 
-`ansible/playbook.yml` устанавливает PostgreSQL 16 и Barman, настраивает репликацию, создаёт резервную копию и выполняет проверки.
-
-В `ansible/templates` находятся конфигурации PostgreSQL, доступа к базе, реплики и Barman.
-
-### Реализация
-
-На `postgresPrimary` работает основная база. Для `postgresStandby` создан физический слот `standby_slot`. Реплика клонируется через `pg_basebackup` и получает изменения от основной базы в режиме hot standby.
-
-На `barman` установлен Barman. Он делает потоковую резервную копию основной базы, получает WAL через слот `barman_slot`, сжимает копии gzip и хранит их по политике `RECOVERY WINDOW OF 7 DAYS`. Обслуживание Barman запускается каждые пять минут, резервная копия создаётся каждый день в 02:00.
-
-В PostgreSQL 16 режим реплики включается файлом `standby.signal`. Параметры подключения к основной базе находятся в `recovery.conf`, который подключается из `otus.conf`.
-
-### Команды и вывод
-
-Запуск стенда:
-
-~~~bash
-vagrant up
-~~~
-
-Проверка состояния репликации:
-
-~~~bash
-vagrant ssh postgresPrimary -c "sudo -u postgres psql -c \"SELECT slot_name, active FROM pg_replication_slots;\""
-vagrant ssh postgresStandby -c "sudo -u postgres psql -tAc 'SELECT pg_is_in_recovery();'"
-~~~
-
-Полученный результат:
-
-~~~text
- standby_slot:true
- t
-~~~
-
-Проверка данных на реплике:
-
-~~~bash
-vagrant ssh postgresStandby -c "sudo -u postgres psql -d otus -c 'SELECT * FROM replication_check;'"
-~~~
-
-~~~text
-replication is working
-~~~
-
-Проверка резервной копии:
-
-~~~bash
-vagrant ssh barman -c "sudo -u barman barman check primary"
-vagrant ssh barman -c "sudo -u barman barman list-backup primary"
-~~~
-
-После запуска получены результаты:
-
-~~~text
- PostgreSQL: OK
- PostgreSQL streaming: OK
- replication slot: OK
- receive-wal running: OK
- minimum redundancy requirements: OK (have 2 backups, expected at least 1)
- primary 20260730T133947 - Thu Jul 30 13:39:47 2026 - Size: 22.3 MiB
-~~~
-
-### Заметки
-
-- Пароли в плейбуке учебные и используются только внутри изолированной сети стенда.
-- Созданная при развертывании резервная копия нужна для проверки Barman. Следующие копии запускаются по расписанию.
+Используется публичный box `bento/ubuntu-24.04`. При первом запуске Vagrant загрузит его автоматически.

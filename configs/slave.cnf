@@ -1,0 +1,11 @@
+[mysqld]
+server-id = 2
+bind-address = 0.0.0.0
+relay-log = mysql-relay-bin
+gtid-mode = ON
+enforce-gtid-consistency = ON
+log-replica-updates = ON
+read-only = ON
+super-read-only = ON
+replicate-ignore-table = bet.events_on_demand
+replicate-ignore-table = bet.v_same_event
