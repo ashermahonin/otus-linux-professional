@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export BORG_REPO="borg@{{ backup_server_ip }}:/var/backup/borg/{{ inventory_hostname }}"
+export BORG_PASSPHRASE='{{ borg_passphrase }}'
+export BORG_RSH="ssh -i /root/.ssh/borg_ed25519 -o StrictHostKeyChecking=accept-new"
+
+backup_file="/var/backups/wordpress/database.sql"
+mariadb-dump -h 127.0.0.1 -u wpbackup -p'{{ wordpress_db_password }}' {{ wordpress_db_name }} > "$backup_file"
+borg create --stats "::{hostname}-{now:%Y-%m-%dT%H:%M:%S}" /var/www/wordpress "$backup_file" /etc/nginx
+borg prune --keep-within=7d --keep-daily=7 --keep-weekly=4 --keep-monthly=6
+logger -t wordpress-backup "Borg backup completed"

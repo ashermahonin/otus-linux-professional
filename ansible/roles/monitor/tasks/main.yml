@@ -1,0 +1,94 @@
+---
+- name: Install observability runtime
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-v2
+    state: present
+
+- name: Enable Docker service
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Create observability directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/observability
+    - /opt/observability/grafana/provisioning/datasources
+    - /opt/observability/grafana/provisioning/dashboards
+    - /opt/observability/grafana/dashboards
+
+- name: Configure Prometheus
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: /opt/observability/prometheus.yml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure Prometheus alert rules
+  ansible.builtin.copy:
+    src: rules.yml
+    dest: /opt/observability/rules.yml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure Alertmanager
+  ansible.builtin.template:
+    src: alertmanager.yml.j2
+    dest: /opt/observability/alertmanager.yml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure Blackbox exporter
+  ansible.builtin.copy:
+    src: blackbox.yml
+    dest: /opt/observability/blackbox.yml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure Grafana data source
+  ansible.builtin.copy:
+    src: datasource.yml
+    dest: /opt/observability/grafana/provisioning/datasources/prometheus.yml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure Grafana dashboard provider
+  ansible.builtin.copy:
+    src: dashboard-provider.yml
+    dest: /opt/observability/grafana/provisioning/dashboards/dashboard.yml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure Grafana dashboard
+  ansible.builtin.copy:
+    src: final-project-dashboard.json
+    dest: /opt/observability/grafana/dashboards/final-project.json
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configure observability Compose stack
+  ansible.builtin.template:
+    src: compose.yml.j2
+    dest: /opt/observability/compose.yml
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Start observability stack
+  ansible.builtin.command: docker compose -f /opt/observability/compose.yml up -d
+  changed_when: false

@@ -1,0 +1,142 @@
+---
+- name: Install edge packages
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - keepalived
+      - iptables
+      - openssl
+    state: present
+
+- name: Find interface for the external network
+  ansible.builtin.shell: "ip -o -4 addr show | awk '$4 ~ /^192\\.168\\.56\\./ {print $2; exit}'"
+  register: external_interface_result
+  changed_when: false
+
+- name: Save external interface name
+  ansible.builtin.set_fact:
+    external_interface: "{{ external_interface_result.stdout }}"
+
+- name: Create TLS certificate directory
+  ansible.builtin.file:
+    path: /etc/nginx/tls
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Create self-signed TLS certificate
+  ansible.builtin.command:
+    argv:
+      - openssl
+      - req
+      - -x509
+      - -nodes
+      - -newkey
+      - rsa:2048
+      - -days
+      - "365"
+      - -keyout
+      - /etc/nginx/tls/web.key
+      - -out
+      - /etc/nginx/tls/web.crt
+      - -subj
+      - "/CN={{ web_domain }}"
+  args:
+    creates: /etc/nginx/tls/web.crt
+
+- name: Configure Nginx HTTPS proxy
+  ansible.builtin.template:
+    src: https-proxy.conf.j2
+    dest: /etc/nginx/sites-available/wordpress
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Nginx
+
+- name: Enable Nginx HTTPS proxy
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/wordpress
+    dest: /etc/nginx/sites-enabled/wordpress
+    state: link
+  notify: Restart Nginx
+
+- name: Disable default Nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Restart Nginx
+
+- name: Configure Nginx log forwarding
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/20-nginx.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      module(load="imfile")
+      input(type="imfile" File="/var/log/nginx/access.log" Tag="nginx-access:" Facility="local6")
+      input(type="imfile" File="/var/log/nginx/error.log" Tag="nginx-error:" Facility="local6")
+  notify: Restart rsyslog
+
+- name: Create firewall rule directory
+  ansible.builtin.file:
+    path: /etc/iptables
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install firewall rules
+  ansible.builtin.template:
+    src: firewall.rules.v4.j2
+    dest: /etc/iptables/otus.rules.v4
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart firewall
+
+- name: Install firewall service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/otus-firewall.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=OTUS edge iptables firewall
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/sbin/iptables-restore /etc/iptables/otus.rules.v4
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Enable firewall service
+  ansible.builtin.systemd:
+    name: otus-firewall
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Configure Keepalived virtual IP
+  ansible.builtin.template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart Keepalived
+
+- name: Enable edge services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - nginx
+    - keepalived

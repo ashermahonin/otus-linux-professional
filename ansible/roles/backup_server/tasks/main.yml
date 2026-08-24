@@ -1,0 +1,28 @@
+---
+- name: Install Borg repository server packages
+  ansible.builtin.apt:
+    name:
+      - borgbackup
+      - openssh-server
+    state: present
+
+- name: Create Borg backup user
+  ansible.builtin.user:
+    name: borg
+    home: /var/backup/borg
+    create_home: true
+    shell: /bin/bash
+
+- name: Create Borg SSH directory
+  ansible.builtin.file:
+    path: /var/backup/borg/.ssh
+    state: directory
+    owner: borg
+    group: borg
+    mode: "0700"
+
+- name: Enable SSH server
+  ansible.builtin.systemd:
+    name: ssh
+    enabled: true
+    state: started

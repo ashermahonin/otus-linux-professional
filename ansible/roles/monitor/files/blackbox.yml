@@ -1,0 +1,8 @@
+modules:
+  https:
+    prober: http
+    timeout: 5s
+    http:
+      method: GET
+      tls_config:
+        insecure_skip_verify: true

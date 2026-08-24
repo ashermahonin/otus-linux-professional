@@ -1,0 +1,32 @@
+{
+  "title": "Aslan - Final project",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "CPU, %",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "100 - (avg by(instance_name) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory, %",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk, %",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"expr": "100 * (1 - node_filesystem_avail_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay\"})", "refId": "A"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Network, bytes/s",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"expr": "sum by(instance_name) (rate(node_network_receive_bytes_total{device!~\"lo\"}[5m]) + rate(node_network_transmit_bytes_total{device!~\"lo\"}[5m]))", "refId": "A"}]
+    }
+  ]
+}

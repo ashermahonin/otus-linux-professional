@@ -1,0 +1,52 @@
+web_domain: web.local
+dmz_vip: 192.168.56.10
+monitor_ip: 192.168.56.50
+
+wordpress_db_name: wordpress
+wordpress_db_user: wordpress
+wordpress_db_password: OtusWordPress-2026
+wordpress_admin_user: admin
+wordpress_admin_password: OtusAdmin-2026
+wordpress_admin_email: admin@web.local
+grafana_admin_password: OtusGrafana-2026
+
+galera_cluster_name: otus_final
+galera_nodes:
+  - 10.10.20.31
+  - 10.10.20.32
+  - 10.10.20.33
+galera_node_addresses:
+  db1: 10.10.20.31
+  db2: 10.10.20.32
+  db3: 10.10.20.33
+
+log_server_dmz_ip: 10.10.10.250
+log_server_backend_ip: 10.10.20.250
+backup_server_ip: 10.10.20.40
+borg_passphrase: OtusBorg-2026
+
+telegram_enabled: false
+telegram_bot_token: ""
+telegram_chat_id: ""
+
+monitor_targets:
+  - name: edge1
+    address: 192.168.56.11:9100
+  - name: edge2
+    address: 192.168.56.12:9100
+  - name: app1
+    address: 10.10.10.21:9100
+  - name: app2
+    address: 10.10.10.22:9100
+  - name: db1
+    address: 10.10.20.31:9100
+  - name: db2
+    address: 10.10.20.32:9100
+  - name: db3
+    address: 10.10.20.33:9100
+  - name: log
+    address: 10.10.20.250:9100
+  - name: backup
+    address: 10.10.20.40:9100
+  - name: monitor
+    address: 10.10.20.50:9100

@@ -1,0 +1,28 @@
+---
+- name: Authorize application backup keys
+  ansible.builtin.lineinfile:
+    path: /var/backup/borg/.ssh/authorized_keys
+    line: "{{ hostvars[item].borg_public_key.stdout }}"
+    create: true
+    owner: borg
+    group: borg
+    mode: "0600"
+  loop: "{{ groups['application'] }}"
+
+- name: Create Borg repository directories
+  ansible.builtin.file:
+    path: "/var/backup/borg/{{ item }}"
+    state: directory
+    owner: borg
+    group: borg
+    mode: "0700"
+  loop: "{{ groups['application'] }}"
+
+- name: Initialize encrypted Borg repositories
+  become_user: borg
+  ansible.builtin.command: "borg init --encryption=repokey-blake2 /var/backup/borg/{{ item }}"
+  args:
+    creates: "/var/backup/borg/{{ item }}/config"
+  environment:
+    BORG_PASSPHRASE: "{{ borg_passphrase }}"
+  loop: "{{ groups['application'] }}"

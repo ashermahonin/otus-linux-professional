@@ -1,0 +1,218 @@
+---
+- name: Install WordPress application packages
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - haproxy
+      - php-fpm
+      - php-cli
+      - php-mysql
+      - php-curl
+      - php-gd
+      - php-mbstring
+      - php-xml
+      - mariadb-client
+      - borgbackup
+    state: present
+
+- name: Install WP-CLI
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+    dest: /usr/local/bin/wp
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Configure local Galera load balancer
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Restart HAProxy with current configuration
+  ansible.builtin.systemd:
+    name: haproxy
+    enabled: true
+    state: restarted
+
+- name: Wait for WordPress database through HAProxy
+  ansible.builtin.command:
+    argv:
+      - mariadb
+      - -h
+      - 127.0.0.1
+      - -u
+      - "{{ wordpress_db_user }}"
+      - "-p{{ wordpress_db_password }}"
+      - "{{ wordpress_db_name }}"
+      - -e
+      - SELECT 1
+  register: wordpress_database_check
+  changed_when: false
+  retries: 30
+  delay: 2
+  until: wordpress_database_check.rc == 0
+  no_log: true
+
+- name: Download WordPress
+  ansible.builtin.get_url:
+    url: https://wordpress.org/latest.tar.gz
+    dest: /tmp/wordpress.tar.gz
+    mode: "0644"
+
+- name: Extract WordPress
+  ansible.builtin.unarchive:
+    src: /tmp/wordpress.tar.gz
+    dest: /var/www
+    remote_src: true
+    creates: /var/www/wordpress/index.php
+
+- name: Set WordPress ownership
+  ansible.builtin.file:
+    path: /var/www/wordpress
+    state: directory
+    owner: www-data
+    group: www-data
+    recurse: true
+
+- name: Configure WordPress
+  ansible.builtin.template:
+    src: wp-config.php.j2
+    dest: /var/www/wordpress/wp-config.php
+    owner: www-data
+    group: www-data
+    mode: "0640"
+
+- name: Configure Nginx site for WordPress
+  ansible.builtin.template:
+    src: wordpress.conf.j2
+    dest: /etc/nginx/sites-available/wordpress
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable WordPress Nginx site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/wordpress
+    dest: /etc/nginx/sites-enabled/wordpress
+    state: link
+
+- name: Disable default Nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+
+- name: Enable Nginx and PHP-FPM
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - nginx
+    - php8.3-fpm
+
+- name: Restart Nginx with current WordPress configuration
+  ansible.builtin.systemd:
+    name: nginx
+    state: restarted
+
+- name: Install WordPress site on first application node
+  become_user: www-data
+  ansible.builtin.command: >-
+    wp core install --path=/var/www/wordpress --url=https://{{ web_domain }}
+    --title="OTUS Final Project" --admin_user={{ wordpress_admin_user }}
+    --admin_password={{ wordpress_admin_password }} --admin_email={{ wordpress_admin_email }}
+    --skip-email
+  args:
+    creates: /var/www/wordpress/.otus-installed
+  when: inventory_hostname == groups['application'][0]
+
+- name: Mark WordPress as installed
+  ansible.builtin.file:
+    path: /var/www/wordpress/.otus-installed
+    state: touch
+    owner: www-data
+    group: www-data
+    mode: "0644"
+  when: inventory_hostname == groups['application'][0]
+
+- name: Configure Nginx log forwarding
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/20-nginx.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      module(load="imfile")
+      input(type="imfile" File="/var/log/nginx/access.log" Tag="nginx-access:" Facility="local6")
+      input(type="imfile" File="/var/log/nginx/error.log" Tag="nginx-error:" Facility="local6")
+  notify: Restart rsyslog
+
+- name: Create SSH key for Borg backup
+  ansible.builtin.command: ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/borg_ed25519
+  args:
+    creates: /root/.ssh/borg_ed25519
+
+- name: Read Borg public key
+  ansible.builtin.command: cat /root/.ssh/borg_ed25519.pub
+  changed_when: false
+  register: borg_public_key
+
+- name: Create local backup directory
+  ansible.builtin.file:
+    path: /var/backups/wordpress
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install WordPress backup script
+  ansible.builtin.template:
+    src: wordpress-backup.sh.j2
+    dest: /usr/local/sbin/wordpress-backup
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install WordPress backup service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wordpress-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=WordPress Borg backup
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/wordpress-backup
+
+- name: Install WordPress backup timer
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/wordpress-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Run WordPress Borg backup every 15 minutes
+
+      [Timer]
+      OnBootSec=10min
+      OnUnitActiveSec=15min
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+- name: Enable WordPress backup timer
+  ansible.builtin.systemd:
+    name: wordpress-backup.timer
+    enabled: true
+    state: started
+    daemon_reload: true

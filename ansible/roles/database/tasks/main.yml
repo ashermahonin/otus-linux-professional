@@ -1,0 +1,80 @@
+---
+- name: Install MariaDB Galera packages
+  ansible.builtin.apt:
+    name:
+      - mariadb-server
+      - galera-4
+      - rsync
+    state: present
+
+- name: Configure MariaDB Galera
+  ansible.builtin.template:
+    src: galera.cnf.j2
+    dest: /etc/mysql/mariadb.conf.d/60-otus-galera.cnf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Check Galera initialization marker
+  ansible.builtin.stat:
+    path: /var/lib/mysql/.otus-galera-initialized
+  register: galera_marker
+
+- name: Stop MariaDB before first cluster initialization
+  ansible.builtin.systemd:
+    name: mariadb
+    state: stopped
+  when: not galera_marker.stat.exists
+
+- name: Bootstrap first Galera node
+  ansible.builtin.command: galera_new_cluster
+  when:
+    - inventory_hostname == groups['database'][0]
+    - not galera_marker.stat.exists
+
+- name: Start joining Galera node
+  ansible.builtin.systemd:
+    name: mariadb
+    enabled: true
+    state: started
+  when:
+    - inventory_hostname != groups['database'][0]
+    - not galera_marker.stat.exists
+
+- name: Ensure initialized MariaDB node is running
+  ansible.builtin.systemd:
+    name: mariadb
+    enabled: true
+    state: started
+  when: galera_marker.stat.exists
+
+- name: Wait for MariaDB socket
+  ansible.builtin.command: mariadb-admin ping
+  register: mariadb_ping
+  changed_when: false
+  retries: 30
+  delay: 2
+  until: mariadb_ping.rc == 0
+
+- name: Create WordPress database and users on first Galera node
+  ansible.builtin.shell: |
+    mariadb <<'SQL'
+    CREATE DATABASE IF NOT EXISTS {{ wordpress_db_name }} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    CREATE USER IF NOT EXISTS '{{ wordpress_db_user }}'@'10.10.20.%' IDENTIFIED BY '{{ wordpress_db_password }}';
+    GRANT ALL PRIVILEGES ON {{ wordpress_db_name }}.* TO '{{ wordpress_db_user }}'@'10.10.20.%';
+    CREATE USER IF NOT EXISTS 'wpbackup'@'10.10.20.%' IDENTIFIED BY '{{ wordpress_db_password }}';
+    GRANT SELECT, SHOW VIEW, TRIGGER, LOCK TABLES ON {{ wordpress_db_name }}.* TO 'wpbackup'@'10.10.20.%';
+    FLUSH PRIVILEGES;
+    SQL
+  args:
+    creates: /var/lib/mysql/.otus-galera-initialized
+  when: inventory_hostname == groups['database'][0]
+
+- name: Mark Galera node as initialized
+  ansible.builtin.file:
+    path: /var/lib/mysql/.otus-galera-initialized
+    state: touch
+    owner: mysql
+    group: mysql
+    mode: "0600"
+  when: not galera_marker.stat.exists

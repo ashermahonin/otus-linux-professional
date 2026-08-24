@@ -1,0 +1,75 @@
+---
+- name: Prepare all servers
+  hosts: all
+  become: true
+  roles:
+    - base
+
+- name: Configure central logging
+  hosts: log_server
+  become: true
+  roles:
+    - log_server
+
+- name: Configure log forwarding
+  hosts: all:!log_server
+  become: true
+  roles:
+    - logging_client
+
+- name: Configure MariaDB Galera cluster
+  hosts: database
+  become: true
+  serial: 1
+  roles:
+    - database
+
+- name: Check MariaDB Galera quorum
+  hosts: database
+  become: true
+  tasks:
+    - name: Check cluster size on first node
+      ansible.builtin.command: mariadb -NBe "SHOW STATUS LIKE 'wsrep_cluster_size'"
+      changed_when: false
+      register: galera_cluster_size
+      retries: 30
+      delay: 2
+      until: galera_cluster_size.stdout == 'wsrep_cluster_size\t3'
+      run_once: true
+      delegate_to: "{{ groups['database'][0] }}"
+
+    - name: Require all MariaDB nodes in the cluster
+      ansible.builtin.assert:
+        that: galera_cluster_size.stdout == 'wsrep_cluster_size\t3'
+        fail_msg: "MariaDB Galera did not form a three-node cluster."
+      run_once: true
+
+- name: Configure backup server
+  hosts: backup_server
+  become: true
+  roles:
+    - backup_server
+
+- name: Configure WordPress application servers
+  hosts: application
+  become: true
+  roles:
+    - application
+
+- name: Allow application servers to access Borg repositories
+  hosts: backup_server
+  become: true
+  roles:
+    - backup_client
+
+- name: Configure edge nodes
+  hosts: edge
+  become: true
+  roles:
+    - edge
+
+- name: Configure monitoring and alerting
+  hosts: monitoring
+  become: true
+  roles:
+    - monitor

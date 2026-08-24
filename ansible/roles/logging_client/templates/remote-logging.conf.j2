@@ -1,0 +1,11 @@
+action(
+  type="omfwd"
+  target="{{ remote_log_server }}"
+  port="514"
+  protocol="tcp"
+  action.resumeRetryCount="-1"
+  queue.type="LinkedList"
+  queue.filename="remote-queue"
+  queue.maxdiskspace="256m"
+  queue.saveonshutdown="on"
+)

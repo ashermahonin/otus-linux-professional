@@ -1,0 +1,26 @@
+<?php
+define( 'DB_NAME', '{{ wordpress_db_name }}' );
+define( 'DB_USER', '{{ wordpress_db_user }}' );
+define( 'DB_PASSWORD', '{{ wordpress_db_password }}' );
+define( 'DB_HOST', '127.0.0.1:3306' );
+define( 'DB_CHARSET', 'utf8mb4' );
+define( 'DB_COLLATE', '' );
+define( 'AUTH_KEY', 'otus-final-auth-key-2026' );
+define( 'SECURE_AUTH_KEY', 'otus-final-secure-auth-key-2026' );
+define( 'LOGGED_IN_KEY', 'otus-final-logged-key-2026' );
+define( 'NONCE_KEY', 'otus-final-nonce-key-2026' );
+define( 'AUTH_SALT', 'otus-final-auth-salt-2026' );
+define( 'SECURE_AUTH_SALT', 'otus-final-secure-salt-2026' );
+define( 'LOGGED_IN_SALT', 'otus-final-logged-salt-2026' );
+define( 'NONCE_SALT', 'otus-final-nonce-salt-2026' );
+define( 'WP_HOME', 'https://{{ web_domain }}' );
+define( 'WP_SITEURL', 'https://{{ web_domain }}' );
+if ( isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https' ) {
+    $_SERVER['HTTPS'] = 'on';
+}
+$table_prefix = 'wp_';
+define( 'WP_DEBUG', false );
+if ( ! defined( 'ABSPATH' ) ) {
+    define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';

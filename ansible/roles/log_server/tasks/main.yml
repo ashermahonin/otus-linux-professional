@@ -1,0 +1,26 @@
+---
+- name: Create remote log directory
+  ansible.builtin.file:
+    path: /var/log/remote
+    state: directory
+    owner: syslog
+    group: adm
+    mode: "0750"
+
+- name: Configure rsyslog listener
+  ansible.builtin.copy:
+    dest: /etc/rsyslog.d/10-listener.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      module(load="imudp")
+      input(type="imudp" port="514")
+      module(load="imtcp")
+      input(type="imtcp" port="514")
+      template(name="RemoteLog" type="string" string="/var/log/remote/%HOSTNAME%/syslog")
+      if ($fromhost-ip != '127.0.0.1') then {
+        action(type="omfile" dynaFile="RemoteLog" createDirs="on" dirCreateMode="0750" fileCreateMode="0640")
+        stop
+      }
+  notify: Restart rsyslog

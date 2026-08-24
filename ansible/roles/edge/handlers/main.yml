@@ -1,0 +1,21 @@
+---
+- name: Restart Nginx
+  ansible.builtin.systemd:
+    name: nginx
+    state: restarted
+
+- name: Restart rsyslog
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted
+
+- name: Restart firewall
+  ansible.builtin.systemd:
+    name: otus-firewall
+    state: restarted
+    daemon_reload: true
+
+- name: Restart Keepalived
+  ansible.builtin.systemd:
+    name: keepalived
+    state: restarted

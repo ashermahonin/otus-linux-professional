@@ -1,0 +1,27 @@
+---
+- name: Update package cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - acl
+      - curl
+      - rsyslog
+      - prometheus-node-exporter
+    state: present
+
+- name: Enable node exporter
+  ansible.builtin.systemd:
+    name: prometheus-node-exporter
+    enabled: true
+    state: started
+
+- name: Enable rsyslog
+  ansible.builtin.systemd:
+    name: rsyslog
+    enabled: true
+    state: started

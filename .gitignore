@@ -1,0 +1,5 @@
+.vagrant/
+.DS_Store
+ansible/group_vars/all/secrets.yml
+recording/*
+!recording/final-defense.mp4

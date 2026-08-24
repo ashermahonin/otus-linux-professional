@@ -1,0 +1,13 @@
+---
+- name: Choose reachable log server address
+  ansible.builtin.set_fact:
+    remote_log_server: "{{ log_server_dmz_ip if ('edge' in group_names or 'application' in group_names) else log_server_backend_ip }}"
+
+- name: Configure persistent remote log queue
+  ansible.builtin.template:
+    src: remote-logging.conf.j2
+    dest: /etc/rsyslog.d/90-remote.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart rsyslog
